@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from typing import Callable
 
 logger = logging.getLogger("conversation")
 
@@ -19,8 +20,13 @@ class _SpeakerBuffer:
 class TranscriptLogger:
     """発話完了イベントの代わりに、無音相当の時間で一行へまとめる。"""
 
-    def __init__(self, flush_seconds: float = 0.8) -> None:
+    def __init__(
+        self,
+        flush_seconds: float = 0.8,
+        on_flush: Callable[[str, str], None] | None = None,
+    ) -> None:
         self.flush_seconds = flush_seconds
+        self.on_flush = on_flush
         self._buffers = {
             "user": _SpeakerBuffer("参加者"),
             "assistant": _SpeakerBuffer("AI"),
@@ -54,6 +60,8 @@ class TranscriptLogger:
         buffer.flush_task = None
         if text:
             logger.info("%s: %s", buffer.label, text)
+            if self.on_flush is not None:
+                self.on_flush(speaker, text)
 
     async def flush_all(self) -> None:
         """通話終了時に、まだ表示していない断片をすべて表示する。"""
@@ -68,4 +76,3 @@ class TranscriptLogger:
 
         for speaker in self._buffers:
             self.flush(speaker)
-

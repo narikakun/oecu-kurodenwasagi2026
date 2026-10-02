@@ -31,6 +31,18 @@ class TranscriptLoggerTest(unittest.IsolatedAsyncioTestCase):
         transcripts.add("assistant", "")
         await transcripts.flush_all()
 
+    async def test_flushed_text_can_be_saved_for_next_session(self):
+        saved = []
+        transcripts = TranscriptLogger(
+            flush_seconds=1,
+            on_flush=lambda speaker, text: saved.append((speaker, text)),
+        )
+        transcripts.add("user", "お願いします")
+
+        await transcripts.flush_all()
+
+        self.assertEqual(saved, [("user", "お願いします")])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -21,6 +21,22 @@ class LoadEnvFileTest(unittest.TestCase):
                 self.assertEqual(settings.api_key, "test-secret")
                 self.assertEqual(settings.live_model, "gpt-live-1")
 
+    def test_reads_separate_voices_and_hold_music_volume(self):
+        values = {
+            "OPENAI_API_KEY": "test-secret",
+            "LIVE_VOICE": "marin",
+            "LIVE_POLICE_VOICE": "cedar",
+            "HOLD_MUSIC_VOLUME": "0.12",
+            "TURN_REPLY_TIMEOUT_MS": "9000",
+        }
+        with patch.dict(os.environ, values, clear=True):
+            settings = Settings.from_env()
+
+        self.assertEqual(settings.live_voice, "marin")
+        self.assertEqual(settings.police_voice, "cedar")
+        self.assertEqual(settings.hold_music_volume, 0.12)
+        self.assertEqual(settings.turn_reply_timeout_ms, 9000)
+
     def test_existing_environment_variable_has_priority(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / ".env"

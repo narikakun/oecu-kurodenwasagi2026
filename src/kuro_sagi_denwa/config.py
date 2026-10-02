@@ -63,7 +63,9 @@ def _device_env(name: str) -> str | int | None:
 class Settings:
     api_key: str
     live_model: str = "gpt-live-1"
+    # 通信担当と警察担当は別セッションなので、別々の声を使える。
     live_voice: str = "marin"
+    police_voice: str = "cedar"
     live_instructions: str = ""
     hook_gpio: int = 17
     dial_gpio: int = 27
@@ -77,6 +79,9 @@ class Settings:
     dial_debounce_ms: int = 12
     digit_timeout_ms: int = 150
     transcript_flush_ms: int = 800
+    initial_silence_prompt_ms: int = 5_000
+    turn_reply_timeout_ms: int = 4_500
+    hold_music_volume: float = 0.15
     mock_gpio: bool = False
 
     @classmethod
@@ -85,6 +90,7 @@ class Settings:
             api_key=os.getenv("OPENAI_API_KEY", "").strip(),
             live_model=os.getenv("LIVE_MODEL", "gpt-live-1").strip(),
             live_voice=os.getenv("LIVE_VOICE", "marin").strip(),
+            police_voice=os.getenv("LIVE_POLICE_VOICE", "cedar").strip(),
             live_instructions=os.getenv(
                 "LIVE_INSTRUCTIONS",
                 "",
@@ -96,6 +102,11 @@ class Settings:
             audio_input_device=_device_env("AUDIO_INPUT_DEVICE"),
             audio_output_device=_device_env("AUDIO_OUTPUT_DEVICE"),
             transcript_flush_ms=int(os.getenv("TRANSCRIPT_FLUSH_MS", "800")),
+            initial_silence_prompt_ms=int(
+                os.getenv("INITIAL_SILENCE_PROMPT_MS", "5000")
+            ),
+            turn_reply_timeout_ms=int(os.getenv("TURN_REPLY_TIMEOUT_MS", "4500")),
+            hold_music_volume=float(os.getenv("HOLD_MUSIC_VOLUME", "0.15")),
             mock_gpio=_bool_env("MOCK_GPIO", False),
         )
 
@@ -108,3 +119,9 @@ class Settings:
             raise ValueError("音声のサンプルレートとブロック時間は正の値が必要です")
         if self.transcript_flush_ms <= 0:
             raise ValueError("TRANSCRIPT_FLUSH_MSは正の値が必要です")
+        if self.initial_silence_prompt_ms <= 0:
+            raise ValueError("INITIAL_SILENCE_PROMPT_MSは正の値が必要です")
+        if self.turn_reply_timeout_ms <= 0:
+            raise ValueError("TURN_REPLY_TIMEOUT_MSは正の値が必要です")
+        if not 0 <= self.hold_music_volume <= 1:
+            raise ValueError("HOLD_MUSIC_VOLUMEは0から1の間で指定してください")

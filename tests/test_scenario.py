@@ -40,6 +40,49 @@ class FraudScenarioTest(unittest.TestCase):
         self.assertIn("具体的な操作へ進まない", prompt)
         self.assertIn("それでも断られたら引き止めをやめ", prompt)
 
+    def test_non_contract_holder_is_asked_relationship_and_call_continues(self):
+        prompt = FraudScenario(ticket_number="547").build_instructions()
+
+        self.assertIn("どういったご関係ですか", prompt)
+        self.assertIn("では、代わりに確認をお願いします", prompt)
+        self.assertIn("関係性が何であっても", prompt)
+
+    def test_ai_uses_fixed_hangup_phrase_only_at_end(self):
+        prompt = FraudScenario(ticket_number="547").build_instructions()
+
+        self.assertIn("それでは、失礼します。", prompt)
+        self.assertIn("会話の途中では絶対に使わず", prompt)
+
+    def test_prompt_prevents_waiting_loop_and_handles_scam_suspicion(self):
+        prompt = FraudScenario(ticket_number="547").build_instructions()
+
+        self.assertIn("整理します", prompt)
+        self.assertIn("少々お待ちください", prompt)
+        self.assertIn("詐欺ではないですか", prompt)
+        self.assertIn("このまま確認を続けてもよろしいですか", prompt)
+
+    def test_transfer_stops_service_session_and_police_has_own_greeting(self):
+        scenario = FraudScenario(ticket_number="547")
+        service_prompt = scenario.build_instructions(role="service")
+        police_prompt = scenario.build_instructions(role="police")
+
+        self.assertIn("別のセッションへ切り替える", service_prompt)
+        self.assertIn("そこで必ず発話を止めて", service_prompt)
+        self.assertIn("警察担当の段階から続けて", police_prompt)
+        self.assertIn("お電話代わりました", scenario.police_greeting_instruction())
+
+    def test_prompt_uses_answers_instead_of_forcing_script_order(self):
+        prompt = FraudScenario(ticket_number="547").build_instructions()
+
+        self.assertIn("答え済みの質問を飛ばして", prompt)
+        self.assertIn("母が契約者です", prompt)
+        self.assertIn("あるかも", prompt)
+        self.assertIn("心当たりがあるのですね", prompt)
+        self.assertIn("覚えがない」と決めつけない", prompt)
+        self.assertIn("そうお感じなのですね", prompt)
+        self.assertIn("情報が漏れて名義を不正利用された可能性があります", prompt)
+        self.assertIn("事実確認済みの情報漏洩として断定してはいけません", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

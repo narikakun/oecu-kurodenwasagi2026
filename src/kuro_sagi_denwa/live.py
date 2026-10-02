@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
 from .audio import AudioDevice
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 class GPTLiveSession:
     URL = "wss://api.openai.com/v1/live/sessions"
+    AI_HANGUP_PHRASE = "それでは、失礼します。"
 
     def __init__(
         self,
@@ -31,8 +33,24 @@ class GPTLiveSession:
         self.scenario = scenario or FraudScenario()
         self._event_sequence = 0
         self.transcripts = TranscriptLogger(
-            flush_seconds=settings.transcript_flush_ms / 1000
+            flush_seconds=settings.transcript_flush_ms / 1000,
+            on_flush=self._remember_transcript,
         )
+        self._history: list[dict[str, Any]] = []
+        self._role = "service"
+        self._assistant_transcript_tail = ""
+        self._handoff_transcript_tail = ""
+        self._ai_hangup_task: asyncio.Task[None] | None = None
+        self._handoff_task: asyncio.Task[None] | None = None
+        self._waiting_for_police_audio = False
+        self._initial_silence_task: asyncio.Task[None] | None = None
+        self._greeting_timer_started = False
+        self._initial_retry_sent = False
+        self._retry_resume_sent = False
+        self._reply_watchdog_task: asyncio.Task[None] | None = None
+        self._audio_control_waiters: dict[str, asyncio.Future[None]] = {}
+        self._unmute_task: asyncio.Task[None] | None = None
+        self._police_greeting_task: asyncio.Task[None] | None = None
         self.websocket: Any = None
         self._sender_task: asyncio.Task[None] | None = None
         self._receiver_task: asyncio.Task[None] | None = None
@@ -50,50 +68,79 @@ class GPTLiveSession:
         # テストなどでscenarioを明示した場合だけ固定値を使う。
         if not self._fixed_scenario:
             self.scenario = FraudScenario()
+        self._assistant_transcript_tail = ""
+        self._handoff_transcript_tail = ""
+        self._history = []
+        self._role = "service"
+        self._ai_hangup_task = None
+        self._handoff_task = None
+        self._waiting_for_police_audio = False
+        self._initial_silence_task = None
+        self._greeting_timer_started = False
+        self._initial_retry_sent = False
+        self._retry_resume_sent = False
+        self._reply_watchdog_task = None
+        self._audio_control_waiters = {}
+        self._unmute_task = None
+        self._police_greeting_task = None
 
-        import websockets
-
-        logger.info("GPT-Liveへ接続します")
-        self._closed_event.clear()
-        self.websocket = await websockets.connect(
-            self.URL,
-            additional_headers={
-                "Authorization": f"Bearer {self.settings.api_key}",
-            },
-            max_size=None,
-        )
         try:
-            await self.websocket.send(json.dumps(self._session_start_event()))
-            await self._wait_until_started()
             await self.audio.start()
+            await self._open_live_session("service", self.settings.live_voice)
         except Exception:
-            await self.websocket.close()
-            self.websocket = None
+            await self.audio.stop()
+            if self.websocket is not None:
+                await self.websocket.close()
+                self.websocket = None
             raise
 
-        self._sender_task = asyncio.create_task(self._send_audio_loop())
-        self._receiver_task = asyncio.create_task(self._receive_loop())
         await self.append_instructions(
             self.scenario.greeting_instruction(),
             event_id=self._next_event_id("scenario_greeting"),
         )
         logger.info("GPT-Liveの会話を開始しました")
 
-    def _session_start_event(self) -> dict[str, Any]:
+    async def _open_live_session(
+        self, role: str, voice: str, start_audio_sender: bool = True
+    ) -> None:
+        """指定した担当用の新しいGPT-Liveセッションを開始する。"""
+        import websockets
+
+        logger.info("GPT-Liveへ接続します（担当=%s、音声=%s）", role, voice)
+        self._role = role
+        self._assistant_transcript_tail = ""
+        self._handoff_transcript_tail = ""
+        self._closed_event.clear()
+        self.websocket = await websockets.connect(
+            self.URL,
+            additional_headers={"Authorization": f"Bearer {self.settings.api_key}"},
+            max_size=None,
+        )
+        await self.websocket.send(json.dumps(self._session_start_event(role, voice)))
+        await self._wait_until_started()
+        self._receiver_task = asyncio.create_task(self._receive_loop())
+        if start_audio_sender:
+            self._sender_task = asyncio.create_task(self._send_audio_loop())
+
+    def _session_start_event(
+        self, role: str = "service", voice: str | None = None
+    ) -> dict[str, Any]:
+        selected_voice = voice or self.settings.live_voice
         return {
             "type": "session.start",
             "event_id": "black_phone_start",
             "session": {
                 "model": self.settings.live_model,
                 "instructions": self.scenario.build_instructions(
-                    self.settings.live_instructions
+                    self.settings.live_instructions, role=role
                 ),
+                "input": list(self._history),
                 "audio": {
                     "format": {
                         "type": "audio/pcm",
                         "rate": self.settings.sample_rate,
                     },
-                    "output": {"voice": self.settings.live_voice},
+                    "output": {"voice": selected_voice},
                 },
                 # 初期版では外部ツールを使わず、音声会話だけに絞る。
                 "delegation": {"type": "client"},
@@ -113,6 +160,26 @@ class GPTLiveSession:
             "content": content,
         }
         await self.websocket.send(json.dumps(event, ensure_ascii=False))
+
+    async def _set_input_muted(self, muted: bool) -> None:
+        """GPT-Liveの入力ミュートを変更し、サーバーの受付完了まで待つ。"""
+        if not self.is_running:
+            return
+        assert self.websocket is not None
+        action = "mute" if muted else "unmute"
+        event_id = self._next_event_id(f"input_{action}")
+        loop = asyncio.get_running_loop()
+        accepted = loop.create_future()
+        self._audio_control_waiters[event_id] = accepted
+        await self.websocket.send(
+            json.dumps(
+                {"type": f"session.input_audio.{action}", "event_id": event_id}
+            )
+        )
+        try:
+            await asyncio.wait_for(accepted, timeout=3)
+        finally:
+            self._audio_control_waiters.pop(event_id, None)
 
     async def notify_dial(self, digit: int) -> None:
         """黒電話で回された数字をGPT-Liveの会話へ通知する。"""
@@ -154,14 +221,53 @@ class GPTLiveSession:
                 event_type = event.get("type")
 
                 if event_type == "session.output_audio.delta":
-                    await self.audio.play(base64.b64decode(event["delta"]))
+                    pcm = base64.b64decode(event["delta"])
+                    if self._waiting_for_police_audio and self._is_audible_pcm(pcm):
+                        self._waiting_for_police_audio = False
+                        if self._police_greeting_task is not None:
+                            self._police_greeting_task.cancel()
+                            self._police_greeting_task = None
+                        await self.audio.stop_hold_music()
+                        logger.info("警察担当の第一声を受信したため保留音を停止しました")
+                        self._unmute_task = asyncio.create_task(
+                            self._unmute_after_police_greeting()
+                        )
+                    if not self._waiting_for_police_audio:
+                        # 音声チャンクだけでは「新しい返答」か直前発話の末尾かを
+                        # 判別できない。応答監視は文字起こしが届くまで解除しない。
+                        await self.audio.play(pcm)
                 elif event_type == "session.input_transcript.delta":
-                    self.transcripts.add("user", event.get("delta", ""))
+                    delta = event.get("delta", "")
+                    self.transcripts.add("user", delta)
+                    if delta.strip() and self._initial_silence_task is not None:
+                        self._initial_silence_task.cancel()
+                        self._initial_silence_task = None
                 elif event_type == "session.output_transcript.delta":
-                    self.transcripts.add("assistant", event.get("delta", ""))
+                    delta = event.get("delta", "")
+                    if delta.strip():
+                        self._cancel_reply_watchdog()
+                    self.transcripts.add("assistant", delta)
+                    if self._detect_handoff(delta):
+                        logger.info("警察担当への切替を開始します")
+                        self._handoff_task = asyncio.create_task(
+                            self._handoff_to_police()
+                        )
+                    elif self._detect_ai_hangup(delta):
+                        logger.info("AI側の通話終了を検知しました")
+                        self._ai_hangup_task = asyncio.create_task(
+                            self._finish_from_ai()
+                        )
                 elif event_type == "session.closed":
                     self._closed_event.set()
                     return
+                elif event_type in {
+                    "session.input_audio.muted",
+                    "session.input_audio.unmuted",
+                }:
+                    client_event_id = event.get("client_event_id", "")
+                    waiter = self._audio_control_waiters.get(client_event_id)
+                    if waiter is not None and not waiter.done():
+                        waiter.set_result(None)
                 elif event_type == "error":
                     message = event.get("error", {}).get("message", "不明なエラー")
                     logger.error("GPT-Liveエラー: %s", message)
@@ -173,29 +279,274 @@ class GPTLiveSession:
             await self.transcripts.flush_all()
             self._closed_event.set()
 
-    async def stop(self) -> None:
-        if not self.is_running:
+    def _detect_ai_hangup(self, delta: str) -> bool:
+        """分割された文字起こしから、AI専用の終了文を検知する。"""
+        if self._ai_hangup_task is not None:
+            return False
+        self._assistant_transcript_tail = (
+            self._assistant_transcript_tail + delta
+        )[-100:]
+        return self.AI_HANGUP_PHRASE in self._assistant_transcript_tail
+
+    @staticmethod
+    def _is_audible_pcm(pcm: bytes, threshold: int = 160) -> bool:
+        """無音に近い先頭チャンクで保留音を止めないための簡易判定。"""
+        if len(pcm) < 2:
+            return False
+        samples = memoryview(pcm[: len(pcm) // 2 * 2]).cast("h")
+        return any(abs(sample) >= threshold for sample in samples)
+
+    def _detect_handoff(self, delta: str) -> bool:
+        """通信担当の転送文を、文字起こしが分割されても検知する。"""
+        if self._role != "service" or self._handoff_task is not None:
+            return False
+        self._handoff_transcript_tail = (
+            self._handoff_transcript_tail + delta
+        )[-100:]
+        return self.scenario.TRANSFER_PHRASE in self._handoff_transcript_tail
+
+    def _remember_transcript(self, speaker: str, text: str) -> None:
+        """次のセッションへ渡すため、確定した会話をテキストで保存する。"""
+        role = "user" if speaker == "user" else "assistant"
+        content_type = "input_text" if role == "user" else "output_text"
+        self._history.append(
+            {
+                "type": "message",
+                "role": role,
+                "content": [{"type": content_type, "text": text}],
+            }
+        )
+        # 長時間の会話でも、新セッションには直近の発話だけを渡す。
+        self._history = self._history[-40:]
+
+        if speaker == "user" and self._handoff_task is None:
+            self._start_reply_watchdog()
+
+        if self._role != "service":
             return
 
-        assert self.websocket is not None
+        # 5秒は接続開始時ではなく、最初の「もしもし」が実際に話し終わって
+        # 文字起こしへ出た時点から数える。接続や音声生成の待ち時間を含めない。
+        if (
+            speaker == "assistant"
+            and not self._greeting_timer_started
+            and "もしもし" in text
+        ):
+            self._greeting_timer_started = True
+            self._initial_silence_task = asyncio.create_task(
+                self._prompt_after_initial_silence()
+            )
+
+        # 再呼びかけと参加者の返答がすれ違った場合でも、待ち状態のままにせず
+        # 通信担当の自己紹介へ明示的に進める。
+        if speaker == "user" and self._initial_retry_sent and not self._retry_resume_sent:
+            self._retry_resume_sent = True
+            self._cancel_reply_watchdog()
+            asyncio.create_task(self._resume_after_initial_retry())
+
+    def _start_reply_watchdog(self) -> None:
+        """参加者への返答が止まった場合に、会話を再開させる。"""
+        self._cancel_reply_watchdog()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # 通常は音声受信ループ内から呼ばれる。同期テストなどでは監視しない。
+            return
+        self._reply_watchdog_task = loop.create_task(self._prompt_reply_after_timeout())
+
+    def _cancel_reply_watchdog(self) -> None:
+        task = self._reply_watchdog_task
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+        self._reply_watchdog_task = None
+
+    async def _prompt_reply_after_timeout(self) -> None:
+        try:
+            timeout = self.settings.turn_reply_timeout_ms / 1000
+            await asyncio.sleep(timeout)
+            logger.warning("参加者への返答がないため、GPT-Liveへ再応答を指示します")
+            await self.append_instructions(
+                "相手が返答した後、こちらの応答が止まっています。相手の直前の発言を"
+                "意味どおりに受け止め、すでに答えた質問は飛ばしてください。"
+                "現在の担当として、自然な短い返答か次の質問を一つだけ今すぐ話してください。",
+                event_id=self._next_event_id("turn_reply_prompt"),
+            )
+            await asyncio.sleep(timeout)
+            logger.warning("再応答がないため、GPT-Liveへもう一度指示します")
+            await self.append_instructions(
+                "まだ返答できていません。保留や沈黙を続けず、直前の相手の発言に対する"
+                "短い返答を今すぐ一つだけ話してください。",
+                event_id=self._next_event_id("turn_reply_retry"),
+            )
+        except asyncio.CancelledError:
+            return
+        finally:
+            if self._reply_watchdog_task is asyncio.current_task():
+                self._reply_watchdog_task = None
+
+    async def _resume_after_initial_retry(self) -> None:
+        await self.append_instructions(
+            "相手から返事があり、こちらの声も聞こえています。今すぐ"
+            "「ありがとうございます。突然のお電話ですみません。通信サービスの確認担当です。」"
+            "とだけ話し、その後は相手の返答を待ってください。",
+            event_id=self._next_event_id("initial_retry_resume"),
+        )
+
+    async def _handoff_to_police(self) -> None:
+        """保留音を挟み、履歴と別の声を使う警察担当セッションへ切り替える。"""
+        try:
+            self._cancel_reply_watchdog()
+            await asyncio.sleep(1.2)
+            await self.audio.wait_until_played()
+            await self.transcripts.flush_all()
+
+            music_path = Path(__file__).parent / "assets" / "audio" / "transfer-hold.mp3"
+            await self.audio.start_hold_music(
+                str(music_path), self.settings.hold_music_volume
+            )
+            await self._close_live_connection()
+
+            self._waiting_for_police_audio = True
+            self.audio.clear_input_queue()
+            await self._open_live_session(
+                "police", self.settings.police_voice, start_audio_sender=False
+            )
+            # 通信担当へ向けた最後の返答が、新しい担当の第一声を遮らないようにする。
+            self.audio.clear_input_queue()
+            await self._set_input_muted(True)
+            self._sender_task = asyncio.create_task(self._send_audio_loop())
+            await self.append_instructions(
+                self.scenario.police_greeting_instruction(),
+                event_id=self._next_event_id("police_greeting"),
+            )
+            self._police_greeting_task = asyncio.create_task(
+                self._ensure_police_greeting()
+            )
+            logger.info("警察担当のGPT-Liveセッションを開始しました")
+        except asyncio.CancelledError:
+            await self.audio.stop_hold_music()
+            raise
+        except Exception:
+            self._waiting_for_police_audio = False
+            await self.audio.stop_hold_music()
+            logger.exception("警察担当への切替に失敗しました")
+
+    async def _unmute_after_police_greeting(self) -> None:
+        """警察担当が話し始めた後、参加者の音声入力を再開する。"""
+        try:
+            if self._sender_task is not None:
+                self._sender_task.cancel()
+                await asyncio.gather(self._sender_task, return_exceptions=True)
+                self._sender_task = None
+            self.audio.clear_input_queue()
+            await self._set_input_muted(False)
+            self._sender_task = asyncio.create_task(self._send_audio_loop())
+            logger.info("警察担当の第一声開始後、マイク入力を再開しました")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("警察担当切替後のマイク入力再開に失敗しました")
+
+    async def _ensure_police_greeting(self) -> None:
+        """警察担当が自分から話し始めない場合、第一声を再度指示する。"""
+        try:
+            timeout = self.settings.turn_reply_timeout_ms / 1000
+            for retry in range(2):
+                await asyncio.sleep(timeout)
+                if not self._waiting_for_police_audio:
+                    return
+                logger.warning(
+                    "警察担当の第一声がないため再指示します（%d回目）", retry + 1
+                )
+                await self.append_instructions(
+                    "相手の発話を待たないでください。今すぐ日本語で"
+                    "「もしもし、お電話代わりました。犯罪対策を担当している者です。」"
+                    "とだけ話し、その後に相手の返答を待ってください。",
+                    event_id=self._next_event_id(f"police_greeting_retry_{retry + 1}"),
+                )
+        except asyncio.CancelledError:
+            return
+        finally:
+            if self._police_greeting_task is asyncio.current_task():
+                self._police_greeting_task = None
+
+    async def _prompt_after_initial_silence(self) -> None:
+        """最初の呼びかけに返事がなければ、アプリ側から再発話を指示する。"""
+        try:
+            await asyncio.sleep(self.settings.initial_silence_prompt_ms / 1000)
+            self._initial_retry_sent = True
+            await self.append_instructions(
+                "相手からまだ返事がありません。今すぐ「もしもし、聞こえますでしょうか。」"
+                "とだけ話し、その後は相手の返答を待ってください。",
+                event_id=self._next_event_id("initial_silence_prompt"),
+            )
+        except asyncio.CancelledError:
+            return
+        finally:
+            self._initial_silence_task = None
+
+    async def _finish_from_ai(self) -> None:
+        """AIの最後の音声を再生後、話中音を鳴らして終了する。"""
+        # GPT-Liveには出力完了イベントがないため、最後の文字起こし後に
+        # 少し待ち、届いた音声キューを再生し切ってから閉じる。
+        await asyncio.sleep(1.2)
+        await self.audio.wait_until_played()
+        await self._close_live_connection()
+        await self.audio.play_busy_tone(repeats=3)
+        await self.audio.stop()
+
+    async def _close_live_connection(self) -> None:
+        if self.websocket is None:
+            return
+
+        if self._initial_silence_task is not None:
+            self._initial_silence_task.cancel()
+            await asyncio.gather(self._initial_silence_task, return_exceptions=True)
+            self._initial_silence_task = None
+
         if self._sender_task is not None:
             self._sender_task.cancel()
             await asyncio.gather(self._sender_task, return_exceptions=True)
-
-        await self.audio.stop()
+            self._sender_task = None
 
         try:
             await self.websocket.send(json.dumps({"type": "session.close"}))
             await asyncio.wait_for(self._closed_event.wait(), timeout=3)
         except Exception as error:
-            # 切断時の通信エラーは終了処理を妨げない。
             logger.debug("GPT-Liveの終了応答を待たずに切断します: %s", error)
         finally:
             if self._receiver_task is not None:
                 self._receiver_task.cancel()
                 await asyncio.gather(self._receiver_task, return_exceptions=True)
+                self._receiver_task = None
             await self.websocket.close()
             self.websocket = None
-            self._sender_task = None
-            self._receiver_task = None
             logger.info("GPT-Liveの会話を終了しました")
+
+    async def stop(self) -> None:
+        current_task = asyncio.current_task()
+        self._cancel_reply_watchdog()
+        for task_name in ("_police_greeting_task", "_unmute_task"):
+            task = getattr(self, task_name)
+            if task is not None and task is not current_task:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                setattr(self, task_name, None)
+        if self._handoff_task is not None and self._handoff_task is not current_task:
+            self._handoff_task.cancel()
+            await asyncio.gather(self._handoff_task, return_exceptions=True)
+            self._handoff_task = None
+        if not self.is_running:
+            if self._ai_hangup_task is not None:
+                self._ai_hangup_task.cancel()
+                await asyncio.gather(self._ai_hangup_task, return_exceptions=True)
+                self._ai_hangup_task = None
+            await self.audio.stop()
+            return
+
+        if self._ai_hangup_task is not None and self._ai_hangup_task is not current_task:
+            self._ai_hangup_task.cancel()
+            await asyncio.gather(self._ai_hangup_task, return_exceptions=True)
+            self._ai_hangup_task = None
+        await self.audio.stop()
+        await self._close_live_connection()

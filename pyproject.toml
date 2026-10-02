@@ -9,6 +9,7 @@ description = "600-A2型黒電話を使ったGPT-Live音声対話装置"
 requires-python = ">=3.11"
 dependencies = [
   "gpiozero>=2.0.1",
+  "miniaudio>=1.61",
   "sounddevice>=0.5.1",
   "websockets>=14.0",
 ]
@@ -25,8 +26,10 @@ kuro-sagi-denwa = "kuro_sagi_denwa.main:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+kuro_sagi_denwa = ["assets/audio/*.mp3"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-
