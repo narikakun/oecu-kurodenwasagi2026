@@ -64,9 +64,7 @@ class Settings:
     api_key: str
     live_model: str = "gpt-live-1"
     live_voice: str = "marin"
-    live_instructions: str = (
-        "あなたは黒電話で話す案内役です。日本語で自然に、短く返答してください。"
-    )
+    live_instructions: str = ""
     hook_gpio: int = 17
     dial_gpio: int = 27
     hook_lifted_when_low: bool = False
@@ -78,6 +76,7 @@ class Settings:
     hook_debounce_ms: int = 30
     dial_debounce_ms: int = 12
     digit_timeout_ms: int = 150
+    transcript_flush_ms: int = 800
     mock_gpio: bool = False
 
     @classmethod
@@ -88,7 +87,7 @@ class Settings:
             live_voice=os.getenv("LIVE_VOICE", "marin").strip(),
             live_instructions=os.getenv(
                 "LIVE_INSTRUCTIONS",
-                "あなたは黒電話で話す案内役です。日本語で自然に、短く返答してください。",
+                "",
             ).strip(),
             hook_gpio=int(os.getenv("HOOK_GPIO", "17")),
             dial_gpio=int(os.getenv("DIAL_GPIO", "27")),
@@ -96,6 +95,7 @@ class Settings:
             dial_pulse_when_low=_bool_env("DIAL_PULSE_WHEN_LOW", True),
             audio_input_device=_device_env("AUDIO_INPUT_DEVICE"),
             audio_output_device=_device_env("AUDIO_OUTPUT_DEVICE"),
+            transcript_flush_ms=int(os.getenv("TRANSCRIPT_FLUSH_MS", "800")),
             mock_gpio=_bool_env("MOCK_GPIO", False),
         )
 
@@ -106,3 +106,5 @@ class Settings:
             raise ValueError("HOOK_GPIOとDIAL_GPIOには別の番号を指定してください")
         if self.sample_rate <= 0 or self.block_ms <= 0:
             raise ValueError("音声のサンプルレートとブロック時間は正の値が必要です")
+        if self.transcript_flush_ms <= 0:
+            raise ValueError("TRANSCRIPT_FLUSH_MSは正の値が必要です")

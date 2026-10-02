@@ -10,6 +10,8 @@ from typing import Any
 
 from .audio import AudioDevice
 from .config import Settings
+from .scenario import FraudScenario
+from .transcript import TranscriptLogger
 
 logger = logging.getLogger(__name__)
 
@@ -17,9 +19,20 @@ logger = logging.getLogger(__name__)
 class GPTLiveSession:
     URL = "wss://api.openai.com/v1/live/sessions"
 
-    def __init__(self, settings: Settings, audio: AudioDevice) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        audio: AudioDevice,
+        scenario: FraudScenario | None = None,
+    ) -> None:
         self.settings = settings
         self.audio = audio
+        self._fixed_scenario = scenario is not None
+        self.scenario = scenario or FraudScenario()
+        self._event_sequence = 0
+        self.transcripts = TranscriptLogger(
+            flush_seconds=settings.transcript_flush_ms / 1000
+        )
         self.websocket: Any = None
         self._sender_task: asyncio.Task[None] | None = None
         self._receiver_task: asyncio.Task[None] | None = None
@@ -32,6 +45,11 @@ class GPTLiveSession:
     async def start(self) -> None:
         if self.is_running:
             return
+
+        # 通常運用では、受付番号を通話ごとに作り直す。
+        # テストなどでscenarioを明示した場合だけ固定値を使う。
+        if not self._fixed_scenario:
+            self.scenario = FraudScenario()
 
         import websockets
 
@@ -55,6 +73,10 @@ class GPTLiveSession:
 
         self._sender_task = asyncio.create_task(self._send_audio_loop())
         self._receiver_task = asyncio.create_task(self._receive_loop())
+        await self.append_instructions(
+            self.scenario.greeting_instruction(),
+            event_id=self._next_event_id("scenario_greeting"),
+        )
         logger.info("GPT-Liveの会話を開始しました")
 
     def _session_start_event(self) -> dict[str, Any]:
@@ -63,7 +85,9 @@ class GPTLiveSession:
             "event_id": "black_phone_start",
             "session": {
                 "model": self.settings.live_model,
-                "instructions": self.settings.live_instructions,
+                "instructions": self.scenario.build_instructions(
+                    self.settings.live_instructions
+                ),
                 "audio": {
                     "format": {
                         "type": "audio/pcm",
@@ -76,6 +100,30 @@ class GPTLiveSession:
                 "store": False,
             },
         }
+
+    async def append_instructions(self, content: str, event_id: str) -> None:
+        """実行中の会話へ、アプリケーション側の指示を追加する。"""
+        if not self.is_running:
+            return
+        assert self.websocket is not None
+        event = {
+            "type": "session.instructions.append",
+            "event_id": event_id,
+            "delegation_id": None,
+            "content": content,
+        }
+        await self.websocket.send(json.dumps(event, ensure_ascii=False))
+
+    async def notify_dial(self, digit: int) -> None:
+        """黒電話で回された数字をGPT-Liveの会話へ通知する。"""
+        await self.append_instructions(
+            self.scenario.dial_instruction(digit),
+            event_id=self._next_event_id(f"dial_{digit}"),
+        )
+
+    def _next_event_id(self, prefix: str) -> str:
+        self._event_sequence += 1
+        return f"{prefix}_{self._event_sequence}"
 
     async def _wait_until_started(self) -> None:
         assert self.websocket is not None
@@ -107,6 +155,10 @@ class GPTLiveSession:
 
                 if event_type == "session.output_audio.delta":
                     await self.audio.play(base64.b64decode(event["delta"]))
+                elif event_type == "session.input_transcript.delta":
+                    self.transcripts.add("user", event.get("delta", ""))
+                elif event_type == "session.output_transcript.delta":
+                    self.transcripts.add("assistant", event.get("delta", ""))
                 elif event_type == "session.closed":
                     self._closed_event.set()
                     return
@@ -118,6 +170,7 @@ class GPTLiveSession:
         except Exception:
             logger.exception("GPT-Liveの受信処理が終了しました")
         finally:
+            await self.transcripts.flush_all()
             self._closed_event.set()
 
     async def stop(self) -> None:

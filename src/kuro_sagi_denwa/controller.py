@@ -19,6 +19,8 @@ class Session(Protocol):
 
     async def stop(self) -> None: ...
 
+    async def notify_dial(self, digit: int) -> None: ...
+
 
 class AppState(Enum):
     IDLE = "idle"
@@ -42,6 +44,8 @@ class PhoneController:
         elif event.type == HardwareEventType.DIAL:
             self.last_digit = event.digit
             logger.info("ダイヤル入力: %s", event.digit)
+            if event.digit is not None and self.session.is_running:
+                await self.session.notify_dial(event.digit)
 
     async def _start_conversation(self) -> None:
         if self.session.is_running or self.state == AppState.CONNECTING:
@@ -63,4 +67,3 @@ class PhoneController:
             await self.session.stop()
         finally:
             self.state = AppState.IDLE
-
