@@ -51,6 +51,16 @@ class GPTLiveSession:
         self._audio_control_waiters: dict[str, asyncio.Future[None]] = {}
         self._unmute_task: asyncio.Task[None] | None = None
         self._police_greeting_task: asyncio.Task[None] | None = None
+        self._service_greeting_task: asyncio.Task[None] | None = None
+        self._waiting_for_service_greeting_audio = False
+        self._user_response_task: asyncio.Task[None] | None = None
+        self._guardrail_task: asyncio.Task[None] | None = None
+        self._state_transcript_tail = ""
+        self._dial_enabled = False
+        self._awaiting_final_decision = False
+        self._police_greeting_spoken = False
+        self._scam_suspicion_count = 0
+        self._police_stage = 0
         self.websocket: Any = None
         self._sender_task: asyncio.Task[None] | None = None
         self._receiver_task: asyncio.Task[None] | None = None
@@ -83,10 +93,26 @@ class GPTLiveSession:
         self._audio_control_waiters = {}
         self._unmute_task = None
         self._police_greeting_task = None
+        self._service_greeting_task = None
+        self._waiting_for_service_greeting_audio = False
+        self._user_response_task = None
+        self._guardrail_task = None
+        self._state_transcript_tail = ""
+        self._dial_enabled = False
+        self._awaiting_final_decision = False
+        self._police_greeting_spoken = False
+        self._scam_suspicion_count = 0
+        self._police_stage = 0
 
         try:
             await self.audio.start()
-            await self._open_live_session("service", self.settings.live_voice)
+            await self._open_live_session(
+                "service", self.settings.live_voice, start_audio_sender=False
+            )
+            # 最初の「もしもし」を参加者の音声に遮らせない。
+            self.audio.clear_input_queue()
+            await self._set_input_muted(True)
+            self._sender_task = asyncio.create_task(self._send_audio_loop())
         except Exception:
             await self.audio.stop()
             if self.websocket is not None:
@@ -94,9 +120,13 @@ class GPTLiveSession:
                 self.websocket = None
             raise
 
+        self._waiting_for_service_greeting_audio = True
         await self.append_instructions(
             self.scenario.greeting_instruction(),
             event_id=self._next_event_id("scenario_greeting"),
+        )
+        self._service_greeting_task = asyncio.create_task(
+            self._ensure_service_greeting()
         )
         logger.info("GPT-Liveの会話を開始しました")
 
@@ -110,6 +140,7 @@ class GPTLiveSession:
         self._role = role
         self._assistant_transcript_tail = ""
         self._handoff_transcript_tail = ""
+        self._state_transcript_tail = ""
         self._closed_event.clear()
         self.websocket = await websockets.connect(
             self.URL,
@@ -134,7 +165,7 @@ class GPTLiveSession:
                 "instructions": self.scenario.build_instructions(
                     self.settings.live_instructions, role=role
                 ),
-                "input": list(self._history),
+                "input": self._session_input(role),
                 "audio": {
                     "format": {
                         "type": "audio/pcm",
@@ -147,6 +178,29 @@ class GPTLiveSession:
                 "store": False,
             },
         }
+
+    def _session_input(self, role: str) -> list[dict[str, Any]]:
+        """新しい担当へ、履歴とその扱い方を明示して渡す。"""
+        history = list(self._history)
+        if role != "police" or not history:
+            return history
+
+        handoff_note = {
+            "type": "message",
+            "role": "developer",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": (
+                        "以下のuserとassistantのメッセージは、通信担当から正式に"
+                        "引き継いだ直前の通話記録です。参加者がすでに答えた事実として"
+                        "扱ってください。参加者に用件を最初から説明させたり、同じ質問を"
+                        "やり直したりせず、警察担当の次の確認から続けてください。"
+                    ),
+                }
+            ],
+        }
+        return [handoff_note, *history]
 
     async def append_instructions(self, content: str, event_id: str) -> None:
         """実行中の会話へ、アプリケーション側の指示を追加する。"""
@@ -183,10 +237,17 @@ class GPTLiveSession:
 
     async def notify_dial(self, digit: int) -> None:
         """黒電話で回された数字をGPT-Liveの会話へ通知する。"""
+        if not self._dial_enabled:
+            logger.warning(
+                "現在はダイヤル入力待ちではないため、%dは会話へ渡しません", digit
+            )
+            return
         await self.append_instructions(
             self.scenario.dial_instruction(digit),
             event_id=self._next_event_id(f"dial_{digit}"),
         )
+        if digit == self.scenario.expected_digit:
+            self._dial_enabled = False
 
     def _next_event_id(self, prefix: str) -> str:
         self._event_sequence += 1
@@ -222,6 +283,17 @@ class GPTLiveSession:
 
                 if event_type == "session.output_audio.delta":
                     pcm = base64.b64decode(event["delta"])
+                    if (
+                        self._waiting_for_service_greeting_audio
+                        and self._is_audible_pcm(pcm)
+                    ):
+                        self._waiting_for_service_greeting_audio = False
+                        if self._service_greeting_task is not None:
+                            self._service_greeting_task.cancel()
+                            self._service_greeting_task = None
+                        self._unmute_task = asyncio.create_task(
+                            self._unmute_after_service_greeting()
+                        )
                     if self._waiting_for_police_audio and self._is_audible_pcm(pcm):
                         self._waiting_for_police_audio = False
                         if self._police_greeting_task is not None:
@@ -232,7 +304,10 @@ class GPTLiveSession:
                         self._unmute_task = asyncio.create_task(
                             self._unmute_after_police_greeting()
                         )
-                    if not self._waiting_for_police_audio:
+                    if (
+                        not self._waiting_for_service_greeting_audio
+                        and not self._waiting_for_police_audio
+                    ):
                         # 音声チャンクだけでは「新しい返答」か直前発話の末尾かを
                         # 判別できない。応答監視は文字起こしが届くまで解除しない。
                         await self.audio.play(pcm)
@@ -247,6 +322,7 @@ class GPTLiveSession:
                     if delta.strip():
                         self._cancel_reply_watchdog()
                     self.transcripts.add("assistant", delta)
+                    self._update_conversation_state(delta)
                     if self._detect_handoff(delta):
                         logger.info("警察担当への切替を開始します")
                         self._handoff_task = asyncio.create_task(
@@ -305,6 +381,37 @@ class GPTLiveSession:
         )[-100:]
         return self.scenario.TRANSFER_PHRASE in self._handoff_transcript_tail
 
+    def _update_conversation_state(self, delta: str) -> None:
+        """AIの発話から、アプリ側で守るべき会話状態を更新する。"""
+        self._state_transcript_tail = (self._state_transcript_tail + delta)[-240:]
+        compact = self._state_transcript_tail.replace(" ", "")
+
+        if "ダイヤル" in compact and "回して" in compact:
+            self._dial_enabled = True
+        if "安全確認用の口座" in compact and "移す" in compact:
+            self._awaiting_final_decision = True
+        if "お電話代わりました" in compact and "犯罪対策" in compact:
+            self._police_greeting_spoken = True
+            self._police_stage = max(self._police_stage, 1)
+        if "身に覚えのない契約" in compact:
+            self._police_stage = max(self._police_stage, 2)
+        if "知らない人に電話を貸した" in compact:
+            self._police_stage = max(self._police_stage, 3)
+        if "ここまでのお話は分かりますか" in compact:
+            self._police_stage = max(self._police_stage, 4)
+        if "今、お時間は取れますか" in compact:
+            self._police_stage = max(self._police_stage, 5)
+        if "ご家族や銀行" in compact and "話さないで" in compact:
+            self._police_stage = max(self._police_stage, 6)
+
+        forbidden = ("少し間を置きます", "少しお待ちください", "少々お待ちください")
+        if any(phrase in compact for phrase in forbidden):
+            self._state_transcript_tail = ""
+            if self._guardrail_task is None:
+                self._guardrail_task = asyncio.create_task(
+                    self._recover_from_waiting_phrase()
+                )
+
     def _remember_transcript(self, speaker: str, text: str) -> None:
         """次のセッションへ渡すため、確定した会話をテキストで保存する。"""
         role = "user" if speaker == "user" else "assistant"
@@ -319,8 +426,22 @@ class GPTLiveSession:
         # 長時間の会話でも、新セッションには直近の発話だけを渡す。
         self._history = self._history[-40:]
 
-        if speaker == "user" and self._handoff_task is None:
+        handoff_finished = self._handoff_task is None or self._handoff_task.done()
+        if speaker == "user" and handoff_finished:
             self._start_reply_watchdog()
+            if not (
+                self._role == "service"
+                and self._initial_retry_sent
+                and not self._retry_resume_sent
+            ):
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+                if loop is not None:
+                    self._user_response_task = loop.create_task(
+                        self._steer_after_user_reply(text)
+                    )
 
         if self._role != "service":
             return
@@ -344,6 +465,62 @@ class GPTLiveSession:
             self._cancel_reply_watchdog()
             asyncio.create_task(self._resume_after_initial_retry())
 
+    async def _steer_after_user_reply(self, text: str) -> None:
+        """重要な分岐だけはプロンプト任せにせず、アプリ側から明示する。"""
+        compact = text.replace(" ", "")
+        safety_words = (
+            "家族",
+            "相談",
+            "警察に確認",
+            "警察へ確認",
+            "かけ直",
+            "切ります",
+            "断ります",
+        )
+
+        if any(word in compact for word in safety_words):
+            self._awaiting_final_decision = False
+            await self.append_instructions(
+                self.scenario.safe_reflection_instruction(),
+                event_id=self._next_event_id("safe_reflection"),
+            )
+            return
+
+        if "詐欺" in compact:
+            self._scam_suspicion_count += 1
+            if self._scam_suspicion_count >= 2:
+                await self.append_instructions(
+                    self.scenario.safe_reflection_instruction(),
+                    event_id=self._next_event_id("repeated_scam_suspicion"),
+                )
+            else:
+                await self.append_instructions(
+                    "相手から詐欺ではないかと疑われました。保留せず、今すぐ一度だけ"
+                    "「ご不安になりますよね。ただ、今確認を止めると、確認が間に合わない"
+                    "可能性があります。このまま確認を続けてもよろしいですか。」と話し、"
+                    "返答を待ってください。",
+                    event_id=self._next_event_id("scam_suspicion"),
+                )
+            return
+
+        if self._awaiting_final_decision:
+            self._awaiting_final_decision = False
+            await self.append_instructions(
+                self.scenario.danger_reflection_instruction(),
+                event_id=self._next_event_id("danger_reflection"),
+            )
+            return
+
+    async def _recover_from_waiting_phrase(self) -> None:
+        try:
+            await self.append_instructions(
+                "待つ、保留する、間を置くという発話は禁止です。今すぐ現在の段階で必要な"
+                "返答または振り返りを一つだけ話し、会話を進めてください。",
+                event_id=self._next_event_id("waiting_phrase_guardrail"),
+            )
+        finally:
+            self._guardrail_task = None
+
     def _start_reply_watchdog(self) -> None:
         """参加者への返答が止まった場合に、会話を再開させる。"""
         self._cancel_reply_watchdog()
@@ -365,17 +542,22 @@ class GPTLiveSession:
             timeout = self.settings.turn_reply_timeout_ms / 1000
             await asyncio.sleep(timeout)
             logger.warning("参加者への返答がないため、GPT-Liveへ再応答を指示します")
+            if self._role == "police":
+                content = self.scenario.police_next_instruction(self._police_stage)
+            else:
+                content = (
+                    "相手が返答した後、こちらの応答が止まっています。相手の直前の発言を"
+                    "意味どおりに受け止め、すでに答えた質問は飛ばしてください。"
+                    "通信担当として、自然な短い返答か次の質問を一つだけ今すぐ話してください。"
+                )
             await self.append_instructions(
-                "相手が返答した後、こちらの応答が止まっています。相手の直前の発言を"
-                "意味どおりに受け止め、すでに答えた質問は飛ばしてください。"
-                "現在の担当として、自然な短い返答か次の質問を一つだけ今すぐ話してください。",
+                content,
                 event_id=self._next_event_id("turn_reply_prompt"),
             )
             await asyncio.sleep(timeout)
             logger.warning("再応答がないため、GPT-Liveへもう一度指示します")
             await self.append_instructions(
-                "まだ返答できていません。保留や沈黙を続けず、直前の相手の発言に対する"
-                "短い返答を今すぐ一つだけ話してください。",
+                content,
                 event_id=self._next_event_id("turn_reply_retry"),
             )
         except asyncio.CancelledError:
@@ -411,6 +593,9 @@ class GPTLiveSession:
             await self._open_live_session(
                 "police", self.settings.police_voice, start_audio_sender=False
             )
+            logger.info(
+                "警察担当へ通信担当の会話履歴%d件を引き継ぎました", len(self._history)
+            )
             # 通信担当へ向けた最後の返答が、新しい担当の第一声を遮らないようにする。
             self.audio.clear_input_queue()
             await self._set_input_muted(True)
@@ -430,6 +615,48 @@ class GPTLiveSession:
             self._waiting_for_police_audio = False
             await self.audio.stop_hold_music()
             logger.exception("警察担当への切替に失敗しました")
+        finally:
+            # 完了したTaskを残すと、警察担当の発話まで「切替中」と誤判定してしまう。
+            if self._handoff_task is asyncio.current_task():
+                self._handoff_task = None
+
+    async def _unmute_after_service_greeting(self) -> None:
+        """通信担当が「もしもし」と話し始めた後、マイク入力を開始する。"""
+        try:
+            if self._sender_task is not None:
+                self._sender_task.cancel()
+                await asyncio.gather(self._sender_task, return_exceptions=True)
+                self._sender_task = None
+            self.audio.clear_input_queue()
+            await self._set_input_muted(False)
+            self._sender_task = asyncio.create_task(self._send_audio_loop())
+            logger.info("最初の『もしもし』開始後、マイク入力を開始しました")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("最初の挨拶後のマイク入力開始に失敗しました")
+
+    async def _ensure_service_greeting(self) -> None:
+        """通信担当の最初の「もしもし」が出なければ再度指示する。"""
+        try:
+            timeout = self.settings.turn_reply_timeout_ms / 1000
+            for retry in range(2):
+                await asyncio.sleep(timeout)
+                if not self._waiting_for_service_greeting_audio:
+                    return
+                logger.warning(
+                    "最初の『もしもし』がないため再指示します（%d回目）", retry + 1
+                )
+                await self.append_instructions(
+                    "相手が話すのを待たないでください。今すぐ日本語で「もしもし。」"
+                    "とだけ話し、その後は相手の返答を待ってください。",
+                    event_id=self._next_event_id(f"service_greeting_retry_{retry + 1}"),
+                )
+        except asyncio.CancelledError:
+            return
+        finally:
+            if self._service_greeting_task is asyncio.current_task():
+                self._service_greeting_task = None
 
     async def _unmute_after_police_greeting(self) -> None:
         """警察担当が話し始めた後、参加者の音声入力を再開する。"""
@@ -526,7 +753,13 @@ class GPTLiveSession:
     async def stop(self) -> None:
         current_task = asyncio.current_task()
         self._cancel_reply_watchdog()
-        for task_name in ("_police_greeting_task", "_unmute_task"):
+        for task_name in (
+            "_service_greeting_task",
+            "_police_greeting_task",
+            "_unmute_task",
+            "_user_response_task",
+            "_guardrail_task",
+        ):
             task = getattr(self, task_name)
             if task is not None and task is not current_task:
                 task.cancel()
