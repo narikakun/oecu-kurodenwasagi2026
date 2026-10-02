@@ -1,0 +1,16 @@
+[Unit]
+Description=Kuro Sagi Denwa GPT-Live Service
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/opt/kuro-sagi-denwa
+EnvironmentFile=/etc/kuro-sagi-denwa.env
+ExecStart=/opt/kuro-sagi-denwa/.venv/bin/kuro-sagi-denwa
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

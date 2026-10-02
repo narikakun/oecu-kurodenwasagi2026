@@ -1,0 +1,49 @@
+# APIキーや実機ごとの設定
+.env
+.env.*
+!.env.example
+
+# Python仮想環境
+.venv/
+venv/
+env/
+
+# Python生成物
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# パッケージ・ビルド生成物
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# テスト・静的解析のキャッシュ
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.tox/
+
+# ログ・一時ファイル
+*.log
+*.pid
+*.tmp
+*.swp
+*.swo
+
+# 録音・動作確認で生成する音声
+*.wav
+*.pcm
+*.raw
+
+# エディタ・OS生成物
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+

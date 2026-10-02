@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kuro-sagi-denwa"
+version = "0.1.0"
+description = "600-A2型黒電話を使ったGPT-Live音声対話装置"
+requires-python = ">=3.11"
+dependencies = [
+  "gpiozero>=2.0.1",
+  "sounddevice>=0.5.1",
+  "websockets>=14.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.24",
+]
+
+[project.scripts]
+kuro-sagi-denwa = "kuro_sagi_denwa.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
