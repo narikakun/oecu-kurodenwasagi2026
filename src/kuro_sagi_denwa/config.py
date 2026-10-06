@@ -73,6 +73,7 @@ class Settings:
     dial_pulse_when_low: bool = True
     audio_input_device: str | int | None = None
     audio_output_device: str | int | None = None
+    audio_device_sample_rate: int = 24_000
     sample_rate: int = 24_000
     block_ms: int = 20
     hook_debounce_ms: int = 30
@@ -101,6 +102,9 @@ class Settings:
             dial_pulse_when_low=_bool_env("DIAL_PULSE_WHEN_LOW", True),
             audio_input_device=_device_env("AUDIO_INPUT_DEVICE"),
             audio_output_device=_device_env("AUDIO_OUTPUT_DEVICE"),
+            audio_device_sample_rate=int(
+                os.getenv("AUDIO_DEVICE_SAMPLE_RATE", "24000")
+            ),
             transcript_flush_ms=int(os.getenv("TRANSCRIPT_FLUSH_MS", "800")),
             initial_silence_prompt_ms=int(
                 os.getenv("INITIAL_SILENCE_PROMPT_MS", "5000")
@@ -115,7 +119,11 @@ class Settings:
             raise ValueError("OPENAI_API_KEYが設定されていません")
         if self.hook_gpio == self.dial_gpio:
             raise ValueError("HOOK_GPIOとDIAL_GPIOには別の番号を指定してください")
-        if self.sample_rate <= 0 or self.block_ms <= 0:
+        if (
+            self.sample_rate <= 0
+            or self.audio_device_sample_rate <= 0
+            or self.block_ms <= 0
+        ):
             raise ValueError("音声のサンプルレートとブロック時間は正の値が必要です")
         if self.transcript_flush_ms <= 0:
             raise ValueError("TRANSCRIPT_FLUSH_MSは正の値が必要です")

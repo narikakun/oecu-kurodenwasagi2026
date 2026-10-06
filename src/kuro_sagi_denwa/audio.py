@@ -13,6 +13,31 @@ from .config import Settings
 logger = logging.getLogger(__name__)
 
 
+def resample_pcm16_mono(pcm: bytes, source_rate: int, target_rate: int) -> bytes:
+    """モノラルPCM16を線形補間で別のサンプルレートへ変換する。"""
+    if source_rate == target_rate or not pcm:
+        return pcm
+
+    source = array("h")
+    source.frombytes(pcm)
+    if not source:
+        return b""
+
+    target_length = max(1, round(len(source) * target_rate / source_rate))
+    target = array("h")
+    for target_index in range(target_length):
+        position = target_index * source_rate / target_rate
+        left_index = min(int(position), len(source) - 1)
+        right_index = min(left_index + 1, len(source) - 1)
+        fraction = position - left_index
+        value = round(
+            source[left_index]
+            + (source[right_index] - source[left_index]) * fraction
+        )
+        target.append(value)
+    return target.tobytes()
+
+
 class AudioDevice:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -29,7 +54,11 @@ class AudioDevice:
             logger.warning("音声入力の警告: %s", status)
         if self._loop is None:
             return
-        data = bytes(indata)
+        data = resample_pcm16_mono(
+            bytes(indata),
+            self.settings.audio_device_sample_rate,
+            self.settings.sample_rate,
+        )
 
         def enqueue() -> None:
             if self.input_queue.full():
@@ -46,10 +75,10 @@ class AudioDevice:
         import sounddevice as sd
 
         self._loop = asyncio.get_running_loop()
-        frames = self.settings.sample_rate * self.settings.block_ms // 1000
+        frames = self.settings.audio_device_sample_rate * self.settings.block_ms // 1000
 
         self._input_stream = sd.RawInputStream(
-            samplerate=self.settings.sample_rate,
+            samplerate=self.settings.audio_device_sample_rate,
             blocksize=frames,
             channels=1,
             dtype="int16",
@@ -57,7 +86,7 @@ class AudioDevice:
             callback=self._capture_callback,
         )
         self._output_stream = sd.RawOutputStream(
-            samplerate=self.settings.sample_rate,
+            samplerate=self.settings.audio_device_sample_rate,
             blocksize=frames,
             channels=1,
             dtype="int16",
@@ -75,7 +104,12 @@ class AudioDevice:
                 self.output_queue.task_done()
                 return
             if self._output_stream is not None:
-                await asyncio.to_thread(self._output_stream.write, data)
+                device_data = resample_pcm16_mono(
+                    data,
+                    self.settings.sample_rate,
+                    self.settings.audio_device_sample_rate,
+                )
+                await asyncio.to_thread(self._output_stream.write, device_data)
             self.output_queue.task_done()
 
     async def play(self, data: bytes) -> None:

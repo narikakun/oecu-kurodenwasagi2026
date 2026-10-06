@@ -1,6 +1,8 @@
 import unittest
 
-from kuro_sagi_denwa.audio import AudioDevice
+from array import array
+
+from kuro_sagi_denwa.audio import AudioDevice, resample_pcm16_mono
 from kuro_sagi_denwa.config import Settings
 
 
@@ -23,6 +25,20 @@ class AudioDeviceTest(unittest.TestCase):
         self.assertEqual(len(pcm), 24_000 * 3 * 2)
         self.assertNotEqual(pcm[:2_000], bytes(2_000))
         self.assertEqual(pcm[-2_000:], bytes(2_000))
+
+    def test_resamples_device_input_from_48khz_to_24khz(self):
+        source = array("h", [0, 100, 200, 300, 400, 500]).tobytes()
+
+        result = resample_pcm16_mono(source, 48_000, 24_000)
+
+        self.assertEqual(array("h", result).tolist(), [0, 200, 400])
+
+    def test_resamples_live_output_from_24khz_to_48khz(self):
+        source = array("h", [0, 200, 400]).tobytes()
+
+        result = resample_pcm16_mono(source, 24_000, 48_000)
+
+        self.assertEqual(array("h", result).tolist(), [0, 100, 200, 300, 400, 400])
 
 
 if __name__ == "__main__":

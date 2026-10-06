@@ -105,6 +105,10 @@ aplay -l
 python -m sounddevice
 ```
 
+USB音声デバイスが24,000 Hzに対応せず`Invalid sample rate`になる場合は、
+`.env`の`AUDIO_DEVICE_SAMPLE_RATE=48000`のように対応レートを指定します。
+GPT-Liveとの通信は24,000 Hzのまま、入出力時に自動変換されます。
+
 ## テスト
 
 ```bash
