@@ -29,6 +29,7 @@ class LoadEnvFileTest(unittest.TestCase):
             "HOLD_MUSIC_VOLUME": "0.12",
             "TURN_REPLY_TIMEOUT_MS": "9000",
             "AUDIO_DEVICE_SAMPLE_RATE": "48000",
+            "CONVERSATION_TEST_MODE": "true",
         }
         with patch.dict(os.environ, values, clear=True):
             settings = Settings.from_env()
@@ -38,6 +39,7 @@ class LoadEnvFileTest(unittest.TestCase):
         self.assertEqual(settings.hold_music_volume, 0.12)
         self.assertEqual(settings.turn_reply_timeout_ms, 9000)
         self.assertEqual(settings.audio_device_sample_rate, 48_000)
+        self.assertTrue(settings.conversation_test_mode)
 
     def test_existing_environment_variable_has_priority(self):
         with tempfile.TemporaryDirectory() as directory:

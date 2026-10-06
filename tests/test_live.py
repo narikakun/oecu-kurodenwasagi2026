@@ -92,6 +92,31 @@ class GPTLiveSessionTest(unittest.TestCase):
             GPTLiveSession._is_audible_pcm((500).to_bytes(2, "little", signed=True))
         )
 
+    def test_conversation_test_mode_has_no_fraud_scenario(self):
+        settings = Settings(
+            api_key="test-key",
+            conversation_test_mode=True,
+            live_instructions="明るい声で話してください。",
+        )
+        session = GPTLiveSession(settings, DummyAudio())
+
+        event = session._session_start_event("test")
+        instructions = event["session"]["instructions"]
+
+        self.assertIn("自由に会話", instructions)
+        self.assertIn("明るい声", instructions)
+        self.assertNotIn("安全確認用の口座", instructions)
+        self.assertNotIn("担当へおつなぎします", instructions)
+        self.assertEqual(event["session"]["input"], [])
+
+    def test_test_mode_does_not_detect_scenario_phrases(self):
+        session = GPTLiveSession(
+            Settings(api_key="test-key", conversation_test_mode=True), DummyAudio()
+        )
+
+        self.assertFalse(session._detect_handoff("担当へおつなぎします。"))
+        self.assertFalse(session._detect_ai_hangup("それでは、失礼します。"))
+
 
 class GPTLiveSilenceTest(unittest.IsolatedAsyncioTestCase):
     async def test_missing_first_hello_is_requested_again(self):

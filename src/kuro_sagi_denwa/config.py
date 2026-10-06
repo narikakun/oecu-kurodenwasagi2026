@@ -67,6 +67,7 @@ class Settings:
     live_voice: str = "marin"
     police_voice: str = "cedar"
     live_instructions: str = ""
+    conversation_test_mode: bool = False
     hook_gpio: int = 17
     dial_gpio: int = 27
     hook_lifted_when_low: bool = False
@@ -96,6 +97,7 @@ class Settings:
                 "LIVE_INSTRUCTIONS",
                 "",
             ).strip(),
+            conversation_test_mode=_bool_env("CONVERSATION_TEST_MODE", False),
             hook_gpio=int(os.getenv("HOOK_GPIO", "17")),
             dial_gpio=int(os.getenv("DIAL_GPIO", "27")),
             hook_lifted_when_low=_bool_env("HOOK_LIFTED_WHEN_LOW", False),

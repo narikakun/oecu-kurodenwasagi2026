@@ -37,7 +37,7 @@ class GPTLiveSession:
             on_flush=self._remember_transcript,
         )
         self._history: list[dict[str, Any]] = []
-        self._role = "service"
+        self._role = "test" if settings.conversation_test_mode else "service"
         self._assistant_transcript_tail = ""
         self._handoff_transcript_tail = ""
         self._ai_hangup_task: asyncio.Task[None] | None = None
@@ -81,7 +81,7 @@ class GPTLiveSession:
         self._assistant_transcript_tail = ""
         self._handoff_transcript_tail = ""
         self._history = []
-        self._role = "service"
+        self._role = "test" if self.settings.conversation_test_mode else "service"
         self._ai_hangup_task = None
         self._handoff_task = None
         self._waiting_for_police_audio = False
@@ -107,7 +107,9 @@ class GPTLiveSession:
         try:
             await self.audio.start()
             await self._open_live_session(
-                "service", self.settings.live_voice, start_audio_sender=False
+                "test" if self.settings.conversation_test_mode else "service",
+                self.settings.live_voice,
+                start_audio_sender=False,
             )
             # 最初の「もしもし」を参加者の音声に遮らせない。
             self.audio.clear_input_queue()
@@ -122,8 +124,10 @@ class GPTLiveSession:
 
         self._waiting_for_service_greeting_audio = True
         await self.append_instructions(
-            self.scenario.greeting_instruction(),
-            event_id=self._next_event_id("scenario_greeting"),
+            self._initial_greeting_instruction(),
+            event_id=self._next_event_id("test_greeting")
+            if self.settings.conversation_test_mode
+            else self._next_event_id("scenario_greeting"),
         )
         self._service_greeting_task = asyncio.create_task(
             self._ensure_service_greeting()
@@ -162,9 +166,7 @@ class GPTLiveSession:
             "event_id": "black_phone_start",
             "session": {
                 "model": self.settings.live_model,
-                "instructions": self.scenario.build_instructions(
-                    self.settings.live_instructions, role=role
-                ),
+                "instructions": self._session_instructions(role),
                 "input": self._session_input(role),
                 "audio": {
                     "format": {
@@ -178,6 +180,30 @@ class GPTLiveSession:
                 "store": False,
             },
         }
+
+    def _session_instructions(self, role: str) -> str:
+        if not self.settings.conversation_test_mode:
+            return self.scenario.build_instructions(
+                self.settings.live_instructions, role=role
+            )
+
+        instructions = (
+            "あなたは黒電話の音声入出力を確認するための会話相手です。"
+            "決められた役割やシナリオはありません。相手の話題に合わせて自然な日本語で"
+            "自由に会話してください。一回の発話は短くし、相手の返答を待ってください。"
+            "実在人物になりすましたり、個人情報を尋ねたりしないでください。"
+        )
+        if self.settings.live_instructions:
+            instructions += "\n\n# 追加設定\n" + self.settings.live_instructions
+        return instructions
+
+    def _initial_greeting_instruction(self) -> str:
+        if self.settings.conversation_test_mode:
+            return (
+                "今すぐ日本語で「もしもし。音声テストを始めます。何か話しかけて"
+                "ください。」とだけ発話し、その後は相手の返答を待ってください。"
+            )
+        return self.scenario.greeting_instruction()
 
     def _session_input(self, role: str) -> list[dict[str, Any]]:
         """新しい担当へ、履歴とその扱い方を明示して渡す。"""
@@ -237,6 +263,9 @@ class GPTLiveSession:
 
     async def notify_dial(self, digit: int) -> None:
         """黒電話で回された数字をGPT-Liveの会話へ通知する。"""
+        if self.settings.conversation_test_mode:
+            logger.info("会話テストモードではダイヤル入力%dを使用しません", digit)
+            return
         if not self._dial_enabled:
             logger.warning(
                 "現在はダイヤル入力待ちではないため、%dは会話へ渡しません", digit
@@ -357,6 +386,8 @@ class GPTLiveSession:
 
     def _detect_ai_hangup(self, delta: str) -> bool:
         """分割された文字起こしから、AI専用の終了文を検知する。"""
+        if self.settings.conversation_test_mode:
+            return False
         if self._ai_hangup_task is not None:
             return False
         self._assistant_transcript_tail = (
@@ -374,6 +405,8 @@ class GPTLiveSession:
 
     def _detect_handoff(self, delta: str) -> bool:
         """通信担当の転送文を、文字起こしが分割されても検知する。"""
+        if self.settings.conversation_test_mode:
+            return False
         if self._role != "service" or self._handoff_task is not None:
             return False
         self._handoff_transcript_tail = (
@@ -383,6 +416,8 @@ class GPTLiveSession:
 
     def _update_conversation_state(self, delta: str) -> None:
         """AIの発話から、アプリ側で守るべき会話状態を更新する。"""
+        if self.settings.conversation_test_mode:
+            return
         self._state_transcript_tail = (self._state_transcript_tail + delta)[-240:]
         compact = self._state_transcript_tail.replace(" ", "")
 
@@ -429,6 +464,8 @@ class GPTLiveSession:
         handoff_finished = self._handoff_task is None or self._handoff_task.done()
         if speaker == "user" and handoff_finished:
             self._start_reply_watchdog()
+            if self.settings.conversation_test_mode:
+                return
             if not (
                 self._role == "service"
                 and self._initial_retry_sent
@@ -542,7 +579,12 @@ class GPTLiveSession:
             timeout = self.settings.turn_reply_timeout_ms / 1000
             await asyncio.sleep(timeout)
             logger.warning("参加者への返答がないため、GPT-Liveへ再応答を指示します")
-            if self._role == "police":
+            if self.settings.conversation_test_mode:
+                content = (
+                    "音声テスト中に相手が返答しましたが、こちらの応答が止まっています。"
+                    "相手の直前の発言に対して、自然な短い返答を今すぐ話してください。"
+                )
+            elif self._role == "police":
                 content = self.scenario.police_next_instruction(self._police_stage)
             else:
                 content = (
@@ -567,6 +609,13 @@ class GPTLiveSession:
                 self._reply_watchdog_task = None
 
     async def _resume_after_initial_retry(self) -> None:
+        if self.settings.conversation_test_mode:
+            await self.append_instructions(
+                "相手から返事がありました。音声テストとして、相手の発言へ自然に短く"
+                "返答し、自由な会話を続けてください。",
+                event_id=self._next_event_id("test_initial_retry_resume"),
+            )
+            return
         await self.append_instructions(
             "相手から返事があり、こちらの声も聞こえています。今すぐ"
             "「ありがとうございます。突然のお電話ですみません。通信サービスの確認担当です。」"
@@ -648,8 +697,7 @@ class GPTLiveSession:
                     "最初の『もしもし』がないため再指示します（%d回目）", retry + 1
                 )
                 await self.append_instructions(
-                    "相手が話すのを待たないでください。今すぐ日本語で「もしもし。」"
-                    "とだけ話し、その後は相手の返答を待ってください。",
+                    self._initial_greeting_instruction(),
                     event_id=self._next_event_id(f"service_greeting_retry_{retry + 1}"),
                 )
         except asyncio.CancelledError:
@@ -702,9 +750,15 @@ class GPTLiveSession:
         try:
             await asyncio.sleep(self.settings.initial_silence_prompt_ms / 1000)
             self._initial_retry_sent = True
+            content = (
+                "相手からまだ返事がありません。今すぐ「もしもし、音声は聞こえますか。」"
+                "とだけ話し、その後は相手の返答を待ってください。"
+                if self.settings.conversation_test_mode
+                else "相手からまだ返事がありません。今すぐ「もしもし、聞こえますでしょうか。」"
+                "とだけ話し、その後は相手の返答を待ってください。"
+            )
             await self.append_instructions(
-                "相手からまだ返事がありません。今すぐ「もしもし、聞こえますでしょうか。」"
-                "とだけ話し、その後は相手の返答を待ってください。",
+                content,
                 event_id=self._next_event_id("initial_silence_prompt"),
             )
         except asyncio.CancelledError:
