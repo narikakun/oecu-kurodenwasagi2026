@@ -26,6 +26,7 @@ class LoadEnvFileTest(unittest.TestCase):
             "OPENAI_API_KEY": "test-secret",
             "LIVE_VOICE": "marin",
             "LIVE_BACKEND_MODEL": "gpt-6-luna",
+            "LIVE_WEB_SEARCH": "false",
             "AUDIO_DEVICE_SAMPLE_RATE": "48000",
             "BELL_OUTPUT_DEVICE": "2",
             "BELL_DEVICE_SAMPLE_RATE": "48000",
@@ -38,6 +39,7 @@ class LoadEnvFileTest(unittest.TestCase):
 
         self.assertEqual(settings.live_voice, "marin")
         self.assertEqual(settings.live_backend_model, "gpt-6-luna")
+        self.assertFalse(settings.live_web_search)
         self.assertEqual(settings.audio_device_sample_rate, 48_000)
         self.assertEqual(settings.bell_output_device, 2)
         self.assertEqual(settings.bell_device_sample_rate, 48_000)
@@ -50,6 +52,8 @@ class LoadEnvFileTest(unittest.TestCase):
             settings = Settings.from_env()
 
         self.assertTrue(settings.display_kiosk)
+        self.assertEqual(settings.live_voice, "meridian")
+        self.assertTrue(settings.live_web_search)
 
     def test_existing_environment_variable_has_priority(self):
         with tempfile.TemporaryDirectory() as directory:

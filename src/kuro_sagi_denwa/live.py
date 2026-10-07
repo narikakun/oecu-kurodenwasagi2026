@@ -78,6 +78,18 @@ class GPTLiveSession:
         if self.settings.live_instructions:
             instructions += "\n\n" + self.settings.live_instructions
 
+        responses: dict[str, Any] = {
+            "model": self.settings.live_backend_model,
+            "instructions": (
+                "ユーザーの質問に日本語で正確かつ簡潔に答えてください。"
+                "最新情報や事実確認が必要な質問ではWeb検索を使用してください。"
+                "確認できなかった場合は、その点を明示してください。"
+            ),
+        }
+        if self.settings.live_web_search:
+            responses["tools"] = [{"type": "web_search"}]
+            responses["tool_choice"] = "auto"
+
         return {
             "type": "session.start",
             "event_id": "black_phone_start",
@@ -93,13 +105,7 @@ class GPTLiveSession:
                 },
                 "delegation": {
                     "type": "responses",
-                    "responses": {
-                        "model": self.settings.live_backend_model,
-                        "instructions": (
-                            "ユーザーの質問に日本語で正確かつ簡潔に答えてください。"
-                            "最新情報を確認できない場合は、その点を明示してください。"
-                        ),
-                    },
+                    "responses": responses,
                 },
             },
         }

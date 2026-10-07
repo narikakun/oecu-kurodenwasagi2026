@@ -63,9 +63,12 @@ kuro-sagi-denwa
 
 GPT-Live部分は、接続、音声送信、音声再生、終了だけの最小構成です。
 会話スタイルを追加したい場合だけ`LIVE_INSTRUCTIONS`を設定します。
+音声はデフォルトでNatural系の男性音声`meridian`を使用します。
 通常の会話はGPT-Liveがそのまま応答し、詳しい確認が必要な質問だけ
 `LIVE_BACKEND_MODEL`のResponsesバックエンドへ自動委譲します。これにより、AIが
 「確認する」と言ったまま結果待ちで止まる状態を防ぎます。
+ResponsesバックエンドではWeb検索を利用でき、最新情報や事実確認が必要な質問にだけ
+`tool_choice=auto`で検索します。無効にする場合は`.env`で`LIVE_WEB_SEARCH=false`にします。
 
 起動中は縦画面用の表示ページを`http://localhost:8080`で開けます。文字起こしは
 表示専用WebSocket（ポート`8765`）でリアルタイムに反映されます。音声デバイス設定中は

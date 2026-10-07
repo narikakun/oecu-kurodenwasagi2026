@@ -55,8 +55,24 @@ class GPTLiveSessionTest(unittest.TestCase):
         self.assertEqual(
             event["session"]["delegation"]["responses"]["model"], "gpt-6-luna"
         )
+        self.assertEqual(
+            event["session"]["delegation"]["responses"]["tools"],
+            [{"type": "web_search"}],
+        )
+        self.assertEqual(
+            event["session"]["delegation"]["responses"]["tool_choice"], "auto"
+        )
         self.assertIn("日本語で自然に会話", event["session"]["instructions"])
         self.assertIn("明るい声", event["session"]["instructions"])
+
+    def test_web_search_can_be_disabled(self):
+        settings = Settings(api_key="test-key", live_web_search=False)
+        session = GPTLiveSession(settings, DummyAudio())
+
+        responses = session._session_start_event()["session"]["delegation"]["responses"]
+
+        self.assertNotIn("tools", responses)
+        self.assertNotIn("tool_choice", responses)
 
     def test_greeting_is_only_moshimoshi(self):
         session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio())

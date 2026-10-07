@@ -64,7 +64,8 @@ class Settings:
     api_key: str
     live_model: str = "gpt-live-1"
     live_backend_model: str = "gpt-6-luna"
-    live_voice: str = "marin"
+    live_web_search: bool = True
+    live_voice: str = "meridian"
     live_instructions: str = ""
     display_kiosk: bool = True
     display_kiosk_browser: str = ""
@@ -92,7 +93,8 @@ class Settings:
             live_backend_model=os.getenv(
                 "LIVE_BACKEND_MODEL", "gpt-6-luna"
             ).strip(),
-            live_voice=os.getenv("LIVE_VOICE", "marin").strip(),
+            live_web_search=_bool_env("LIVE_WEB_SEARCH", True),
+            live_voice=os.getenv("LIVE_VOICE", "meridian").strip(),
             live_instructions=os.getenv(
                 "LIVE_INSTRUCTIONS",
                 "",
