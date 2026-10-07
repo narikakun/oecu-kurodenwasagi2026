@@ -75,6 +75,10 @@ class GPTLiveSessionTest(unittest.TestCase):
             event["session"]["delegation"]["responses"]["tool_choice"], "auto"
         )
         self.assertIn("日本語で自然に会話", event["session"]["instructions"])
+        self.assertIn("一度の発話は原則1〜2文", event["session"]["instructions"])
+        self.assertIn("質問は1つだけ", event["session"]["instructions"])
+        self.assertIn("毎回質問で返さない", event["session"]["instructions"])
+        self.assertIn("相手が話し始めたら発話を止め", event["session"]["instructions"])
         self.assertIn("明るい声", event["session"]["instructions"])
 
     def test_web_search_can_be_disabled(self):
