@@ -62,10 +62,24 @@ class FakeDeviceSelector:
         self.digits.append(digit)
 
 
+class FakeDisplay:
+    def __init__(self):
+        self.events = []
+        self.reset_count = 0
+
+    def publish(self, event):
+        self.events.append(event)
+
+    def reset(self):
+        self.reset_count += 1
+        self.events.clear()
+
+
 class PhoneControllerTest(unittest.IsolatedAsyncioTestCase):
     async def test_hook_starts_and_stops_conversation(self):
         session = FakeSession()
-        controller = PhoneController(session)
+        display = FakeDisplay()
+        controller = PhoneController(session, display=display)
 
         await controller.handle(HardwareEvent(HardwareEventType.HOOK_UP))
         self.assertEqual(controller.state, AppState.CONVERSATION)
@@ -74,6 +88,8 @@ class PhoneControllerTest(unittest.IsolatedAsyncioTestCase):
         await controller.handle(HardwareEvent(HardwareEventType.HOOK_DOWN))
         self.assertEqual(controller.state, AppState.IDLE)
         self.assertEqual(session.stop_count, 1)
+        self.assertEqual(display.reset_count, 1)
+        self.assertEqual(display.events, [])
 
     async def test_duplicate_hook_up_does_not_start_twice(self):
         session = FakeSession()

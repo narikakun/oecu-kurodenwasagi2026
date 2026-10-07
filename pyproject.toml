@@ -27,7 +27,7 @@ kuro-sagi-denwa = "kuro_sagi_denwa.main:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-kuro_sagi_denwa = ["assets/audio/*.mp3"]
+kuro_sagi_denwa = ["assets/audio/*.mp3", "assets/display/*.html"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

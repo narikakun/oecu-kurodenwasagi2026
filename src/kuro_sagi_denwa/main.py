@@ -8,6 +8,7 @@ import logging
 from .audio import AudioDevice, AudioDeviceSelector, BellRinger
 from .config import Settings, load_env_file
 from .controller import PhoneController
+from .display import DisplayServer
 from .hardware import MockPhoneHardware, PhoneHardware
 from .live import GPTLiveSession
 
@@ -18,12 +19,17 @@ async def run() -> None:
     settings.validate()
 
     hardware = MockPhoneHardware() if settings.mock_gpio else PhoneHardware(settings)
+    display = DisplayServer()
+    await display.start()
+    if settings.display_kiosk:
+        await display.start_kiosk(settings.display_kiosk_browser)
     audio = AudioDevice(settings)
     ringer = BellRinger(settings)
-    device_selector = AudioDeviceSelector(audio, ringer)
+    device_selector = AudioDeviceSelector(audio, ringer, display)
     device_selector.show_current()
-    session = GPTLiveSession(settings, audio)
-    controller = PhoneController(session, ringer, device_selector)
+    display.reset()
+    session = GPTLiveSession(settings, audio, display)
+    controller = PhoneController(session, ringer, device_selector, display)
 
     try:
         async for event in hardware.events():
@@ -31,6 +37,7 @@ async def run() -> None:
     finally:
         await ringer.stop()
         await session.stop()
+        await display.stop()
         hardware.close()
 
 

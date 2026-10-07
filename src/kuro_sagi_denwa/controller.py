@@ -56,10 +56,12 @@ class PhoneController:
         session: Session,
         ringer: Ringer | None = None,
         device_selector: DeviceSelector | None = None,
+        display=None,
     ) -> None:
         self.session = session
         self.ringer = ringer
         self.device_selector = device_selector
+        self.display = display
         self.state = AppState.IDLE
         self.last_digit: int | None = None
         self._hook_up = False
@@ -75,6 +77,8 @@ class PhoneController:
         elif event.type == HardwareEventType.HOOK_DOWN:
             self._hook_up = False
             await self._end_conversation()
+            if self.display is not None:
+                self.display.reset()
         elif event.type == HardwareEventType.DIAL:
             self.last_digit = event.digit
             logger.info("ダイヤル入力: %s", event.digit)
@@ -87,6 +91,7 @@ class PhoneController:
                 if not self.device_selector.active:
                     await self._cancel_ring()
                     self.device_selector.enter()
+                    self._display_state("settings", "音声設定中")
                 self.device_selector.handle_digit(event.digit)
             elif event.digit is not None and not self._hook_up:
                 self._schedule_ring(event.digit)
@@ -105,12 +110,14 @@ class PhoneController:
             self._ring_after_delay(delay_seconds)
         )
         logger.info("%d秒後にベルを鳴らします", delay_seconds)
+        self._display_state("ring_scheduled", f"{delay_seconds}秒後に呼び出します")
 
     async def _ring_after_delay(self, delay_seconds: int) -> None:
         try:
             await asyncio.sleep(delay_seconds)
             if not self._hook_up and self.ringer is not None:
                 await self.ringer.start()
+                self._display_state("ringing", "呼び出し中")
         except asyncio.CancelledError:
             return
         finally:
@@ -129,11 +136,14 @@ class PhoneController:
         if self.session.is_running or self.state == AppState.CONNECTING:
             return
         self.state = AppState.CONNECTING
+        self._display_state("connecting", "接続中")
         try:
             await self.session.start()
             self.state = AppState.CONVERSATION
+            self._display_state("conversation", "通話中")
         except Exception:
             self.state = AppState.ERROR
+            self._display_state("error", "接続エラー")
             logger.exception("会話を開始できませんでした")
 
     async def _end_conversation(self) -> None:
@@ -145,3 +155,7 @@ class PhoneController:
             await self.session.stop()
         finally:
             self.state = AppState.IDLE
+
+    def _display_state(self, state: str, label: str) -> None:
+        if self.display is not None:
+            self.display.publish({"type": "state", "state": state, "label": label})

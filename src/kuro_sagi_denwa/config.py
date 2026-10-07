@@ -63,8 +63,11 @@ def _device_env(name: str) -> str | int | None:
 class Settings:
     api_key: str
     live_model: str = "gpt-live-1"
+    live_backend_model: str = "gpt-6-luna"
     live_voice: str = "marin"
     live_instructions: str = ""
+    display_kiosk: bool = True
+    display_kiosk_browser: str = ""
     hook_gpio: int = 17
     dial_gpio: int = 26
     hook_lifted_when_low: bool = False
@@ -86,11 +89,16 @@ class Settings:
         return cls(
             api_key=os.getenv("OPENAI_API_KEY", "").strip(),
             live_model=os.getenv("LIVE_MODEL", "gpt-live-1").strip(),
+            live_backend_model=os.getenv(
+                "LIVE_BACKEND_MODEL", "gpt-6-luna"
+            ).strip(),
             live_voice=os.getenv("LIVE_VOICE", "marin").strip(),
             live_instructions=os.getenv(
                 "LIVE_INSTRUCTIONS",
                 "",
             ).strip(),
+            display_kiosk=_bool_env("DISPLAY_KIOSK", True),
+            display_kiosk_browser=os.getenv("DISPLAY_KIOSK_BROWSER", "").strip(),
             hook_gpio=int(os.getenv("HOOK_GPIO", "17")),
             dial_gpio=int(os.getenv("DIAL_GPIO", "26")),
             hook_lifted_when_low=_bool_env("HOOK_LIFTED_WHEN_LOW", False),

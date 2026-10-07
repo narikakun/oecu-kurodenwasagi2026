@@ -19,7 +19,11 @@ class GPTLiveSession:
     """1接続だけを使い、受話器とGPT-Liveの音声をそのまま中継する。"""
 
     URL = "wss://api.openai.com/v1/live/sessions"
-    DEFAULT_INSTRUCTIONS = "日本語で自然に会話してください。"
+    DEFAULT_INSTRUCTIONS = (
+        "日本語で自然に会話してください。通常の挨拶や簡単な質問にはすぐ答えてください。"
+        "詳しい確認が必要な質問はResponsesバックエンドへ委譲し、結果が届いたら必ず会話を"
+        "再開して回答してください。結果を待たないまま会話を終わらせないでください。"
+    )
     GREETING_INSTRUCTION = (
         "今すぐ日本語で「もしもし？」とだけ話してください。"
         "その後は何も続けず、相手の返答を待ってください。"
@@ -27,9 +31,10 @@ class GPTLiveSession:
     TRANSCRIPT_IDLE_SECONDS = 1.0
     TRANSCRIPT_SENTENCE_SECONDS = 0.15
 
-    def __init__(self, settings: Settings, audio: AudioDevice) -> None:
+    def __init__(self, settings: Settings, audio: AudioDevice, display: Any = None) -> None:
         self.settings = settings
         self.audio = audio
+        self.display = display
         self.websocket: Any = None
         self._sender_task: asyncio.Task[None] | None = None
         self._receiver_task: asyncio.Task[None] | None = None
@@ -86,6 +91,16 @@ class GPTLiveSession:
                     },
                     "output": {"voice": self.settings.live_voice},
                 },
+                "delegation": {
+                    "type": "responses",
+                    "responses": {
+                        "model": self.settings.live_backend_model,
+                        "instructions": (
+                            "ユーザーの質問に日本語で正確かつ簡潔に答えてください。"
+                            "最新情報を確認できない場合は、その点を明示してください。"
+                        ),
+                    },
+                },
             },
         }
 
@@ -116,6 +131,15 @@ class GPTLiveSession:
         if not current:
             transcript_logger.info("文字起こし中（%s）: %s", label, delta)
         self._transcript_buffers[label] = current + delta
+        if self.display is not None:
+            self.display.publish(
+                {
+                    "type": "transcript",
+                    "speaker": "user" if label == "参加者" else "assistant",
+                    "status": "partial",
+                    "text": self._transcript_buffers[label],
+                }
+            )
 
         previous_handle = self._transcript_flush_handles.pop(label, None)
         if previous_handle is not None:
@@ -138,6 +162,15 @@ class GPTLiveSession:
         text = self._transcript_buffers.pop(label, "")
         if text:
             transcript_logger.info("%s: %s", label, text)
+            if self.display is not None:
+                self.display.publish(
+                    {
+                        "type": "transcript",
+                        "speaker": "user" if label == "参加者" else "assistant",
+                        "status": "final",
+                        "text": text,
+                    }
+                )
 
     def _flush_all_transcripts(self) -> None:
         for label in list(self._transcript_buffers):

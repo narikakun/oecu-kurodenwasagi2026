@@ -25,6 +25,14 @@ class FakeWebSocket:
         self.sent.append(json.loads(value))
 
 
+class FakeDisplay:
+    def __init__(self):
+        self.events = []
+
+    def publish(self, event):
+        self.events.append(event)
+
+
 class GPTLiveSessionTest(unittest.TestCase):
     def test_session_start_event_is_minimal_free_conversation(self):
         settings = Settings(
@@ -43,7 +51,10 @@ class GPTLiveSessionTest(unittest.TestCase):
         self.assertEqual(event["session"]["audio"]["output"]["voice"], "marin")
         self.assertNotIn("input", event["session"])
         self.assertNotIn("store", event["session"])
-        self.assertNotIn("delegation", event["session"])
+        self.assertEqual(event["session"]["delegation"]["type"], "responses")
+        self.assertEqual(
+            event["session"]["delegation"]["responses"]["model"], "gpt-6-luna"
+        )
         self.assertIn("日本語で自然に会話", event["session"]["instructions"])
         self.assertIn("明るい声", event["session"]["instructions"])
 
@@ -60,7 +71,8 @@ class GPTLiveSessionTest(unittest.TestCase):
 
 class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
     async def test_logs_only_input_and_output_transcripts(self):
-        session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio())
+        display = FakeDisplay()
+        session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio(), display)
 
         with self.assertLogs("kuro_sagi_denwa.transcript", level="INFO") as logs:
             self.assertTrue(
@@ -84,6 +96,9 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("文字起こし中（AI）: もしもし", logs.output[1])
         self.assertIn("参加者: こんにちは、元気ですか？", logs.output[2])
         self.assertIn("AI: もしもし", logs.output[3])
+        self.assertEqual(display.events[0]["status"], "partial")
+        self.assertEqual(display.events[1]["text"], "こんにちは、元気ですか？")
+        self.assertEqual(display.events[-1]["status"], "final")
 
     async def test_does_not_log_audio_base64(self):
         session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio())

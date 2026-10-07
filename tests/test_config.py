@@ -25,19 +25,31 @@ class LoadEnvFileTest(unittest.TestCase):
         values = {
             "OPENAI_API_KEY": "test-secret",
             "LIVE_VOICE": "marin",
+            "LIVE_BACKEND_MODEL": "gpt-6-luna",
             "AUDIO_DEVICE_SAMPLE_RATE": "48000",
             "BELL_OUTPUT_DEVICE": "2",
             "BELL_DEVICE_SAMPLE_RATE": "48000",
             "BELL_VOLUME": "0.6",
+            "DISPLAY_KIOSK": "false",
+            "DISPLAY_KIOSK_BROWSER": "/usr/bin/chromium",
         }
         with patch.dict(os.environ, values, clear=True):
             settings = Settings.from_env()
 
         self.assertEqual(settings.live_voice, "marin")
+        self.assertEqual(settings.live_backend_model, "gpt-6-luna")
         self.assertEqual(settings.audio_device_sample_rate, 48_000)
         self.assertEqual(settings.bell_output_device, 2)
         self.assertEqual(settings.bell_device_sample_rate, 48_000)
         self.assertEqual(settings.bell_volume, 0.6)
+        self.assertFalse(settings.display_kiosk)
+        self.assertEqual(settings.display_kiosk_browser, "/usr/bin/chromium")
+
+    def test_kiosk_is_enabled_by_default(self):
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-secret"}, clear=True):
+            settings = Settings.from_env()
+
+        self.assertTrue(settings.display_kiosk)
 
     def test_existing_environment_variable_has_priority(self):
         with tempfile.TemporaryDirectory() as directory:

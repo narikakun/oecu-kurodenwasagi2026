@@ -106,18 +106,28 @@ class AudioDeviceSelector:
         2: ("ベル出力", "bell"),
     }
 
-    def __init__(self, audio: AudioDevice, ringer: BellRinger) -> None:
+    def __init__(self, audio: AudioDevice, ringer: BellRinger, display: Any = None) -> None:
         self.audio = audio
         self.ringer = ringer
+        self.display = display
         self.active = False
         self._pending_target: str | None = None
 
     def show_current(self) -> None:
+        input_description = self._describe(self.audio.input_device, "input")
+        output_description = self._describe(self.audio.output_device, "output")
+        bell_description = self._describe(self.ringer.output_device, "output")
         logger.info(
             "音声デバイス設定: 受話器入力=%s / 受話器出力=%s / ベル出力=%s",
-            self._describe(self.audio.input_device, "input"),
-            self._describe(self.audio.output_device, "output"),
-            self._describe(self.ringer.output_device, "output"),
+            input_description,
+            output_description,
+            bell_description,
+        )
+        self._show_on_display(
+            "現在の音声設定\n"
+            f"受話器入力：{input_description}\n"
+            f"受話器出力：{output_description}\n"
+            f"ベル出力：{bell_description}"
         )
 
     def enter(self) -> None:
@@ -126,12 +136,17 @@ class AudioDeviceSelector:
         logger.info(
             "音声デバイス設定モード: 0=受話器入力, 1=受話器出力, 2=ベル出力"
         )
+        self._show_on_display(
+            "音声デバイス設定中\n0：受話器入力　1：受話器出力　2：ベル出力"
+        )
 
     def exit(self) -> None:
         if self.active:
             logger.info("音声デバイス設定モードを終了します")
         self.active = False
         self._pending_target = None
+        if self.display is not None:
+            self.display.publish({"type": "settings", "active": False})
 
     def handle_digit(self, digit: int) -> None:
         if self._pending_target is None:
@@ -177,6 +192,11 @@ class AudioDeviceSelector:
             if index <= 9 and device[channel_key] > 0
         ]
         logger.info("選択可能なデバイス: %s", ", ".join(available) or "なし")
+        self._show_on_display("選択可能なデバイス\n" + ("\n".join(available) or "なし"))
+
+    def _show_on_display(self, text: str) -> None:
+        if self.display is not None:
+            self.display.publish({"type": "settings", "active": True, "text": text})
 
     def _supports(self, index: int, target: str) -> bool:
         devices = self._devices()
