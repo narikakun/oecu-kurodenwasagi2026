@@ -114,8 +114,9 @@ aplay -l
 python -m sounddevice
 ```
 
-USB音声デバイスが24,000 Hzに対応せず`Invalid sample rate`になる場合は、
-`.env`の`AUDIO_DEVICE_SAMPLE_RATE=48000`のように対応レートを指定します。
+USB音声デバイス向けの既定値は`AUDIO_DEVICE_SAMPLE_RATE=48000`です。
+デバイスが指定形式に対応せず`Invalid sample rate`や`Sample format not supported`に
+なる場合は、そのデバイスが対応するサンプルレートを指定します。
 GPT-Liveとの通信は24,000 Hzのまま、入出力時に自動変換されます。
 
 受話器とベルに別々のスピーカーを使う場合は、`python -m sounddevice`で番号を確認し、

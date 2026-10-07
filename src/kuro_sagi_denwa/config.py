@@ -74,7 +74,7 @@ class Settings:
     hook_lifted_when_low: bool = False
     audio_input_device: str | int | None = None
     audio_output_device: str | int | None = None
-    audio_device_sample_rate: int = 24_000
+    audio_device_sample_rate: int = 48_000
     bell_output_device: str | int | None = None
     bell_device_sample_rate: int = 48_000
     bell_volume: float = 0.7
@@ -107,7 +107,7 @@ class Settings:
             audio_input_device=_device_env("AUDIO_INPUT_DEVICE"),
             audio_output_device=_device_env("AUDIO_OUTPUT_DEVICE"),
             audio_device_sample_rate=int(
-                os.getenv("AUDIO_DEVICE_SAMPLE_RATE", "24000")
+                os.getenv("AUDIO_DEVICE_SAMPLE_RATE", "48000")
             ),
             bell_output_device=_device_env("BELL_OUTPUT_DEVICE"),
             bell_device_sample_rate=int(

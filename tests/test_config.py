@@ -54,6 +54,7 @@ class LoadEnvFileTest(unittest.TestCase):
         self.assertTrue(settings.display_kiosk)
         self.assertEqual(settings.live_voice, "meridian")
         self.assertTrue(settings.live_web_search)
+        self.assertEqual(settings.audio_device_sample_rate, 48_000)
 
     def test_existing_environment_variable_has_priority(self):
         with tempfile.TemporaryDirectory() as directory:
