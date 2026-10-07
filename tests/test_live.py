@@ -12,17 +12,29 @@ class DummyAudio:
     def __init__(self):
         self.input_queue = asyncio.Queue()
         self.played = []
+        self.wait_count = 0
+        self.clear_count = 0
 
     async def play(self, data):
         self.played.append(data)
 
+    async def wait_until_played(self):
+        self.wait_count += 1
+
+    def clear_input_queue(self):
+        self.clear_count += 1
+
 
 class FakeWebSocket:
-    def __init__(self):
+    def __init__(self, received=None):
         self.sent = []
+        self.received = list(received or [])
 
     async def send(self, value):
         self.sent.append(json.loads(value))
+
+    async def recv(self):
+        return json.dumps(self.received.pop(0))
 
 
 class FakeDisplay:
@@ -81,11 +93,33 @@ class GPTLiveSessionTest(unittest.TestCase):
 
         self.assertEqual(event["type"], "session.instructions.append")
         self.assertIsNone(event["delegation_id"])
-        self.assertIn("「もしもし？」とだけ", event["content"])
+        self.assertIn("「もしもし？」と正確に一度だけ", event["content"])
+        self.assertIn("会話の最初の発話", event["content"])
         self.assertIn("相手の返答を待って", event["content"])
 
 
 class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
+    async def test_waits_for_initial_greeting_before_conversation(self):
+        audio = DummyAudio()
+        session = GPTLiveSession(Settings(api_key="test-key"), audio)
+        session.websocket = FakeWebSocket(
+            [
+                {
+                    "type": "session.output_audio.delta",
+                    "delta": base64.b64encode(b"moshimoshi").decode("ascii"),
+                },
+                {
+                    "type": "session.instructions.appended",
+                    "client_event_id": "initial_greeting",
+                },
+            ]
+        )
+
+        await session._wait_until_greeting_accepted()
+
+        self.assertEqual(audio.played, [b"moshimoshi"])
+        self.assertEqual(audio.wait_count, 1)
+
     async def test_logs_only_input_and_output_transcripts(self):
         display = FakeDisplay()
         session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio(), display)
