@@ -92,7 +92,8 @@ class PhoneController:
                     await self._cancel_ring()
                     self.device_selector.enter()
                     self._display_state("settings", "音声設定中")
-                self.device_selector.handle_digit(event.digit)
+                else:
+                    self.device_selector.handle_digit(event.digit)
             elif event.digit is not None and not self._hook_up:
                 self._schedule_ring(event.digit)
             elif event.digit is not None and self.session.is_running:

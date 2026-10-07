@@ -161,6 +161,11 @@ class PhoneControllerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(ringer.stop_count, 1)
         self.assertEqual(selector.enter_count, 1)
+        self.assertEqual(selector.digits, [])
+
+        await controller.handle(HardwareEvent(HardwareEventType.DIAL, 2))
+
+        self.assertEqual(selector.enter_count, 1)
         self.assertEqual(selector.digits, [2])
 
     async def test_hook_up_exits_device_settings(self):
