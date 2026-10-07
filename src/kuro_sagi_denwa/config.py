@@ -71,6 +71,9 @@ class Settings:
     audio_input_device: str | int | None = None
     audio_output_device: str | int | None = None
     audio_device_sample_rate: int = 24_000
+    bell_output_device: str | int | None = None
+    bell_device_sample_rate: int = 48_000
+    bell_volume: float = 0.7
     sample_rate: int = 24_000
     block_ms: int = 20
     hook_debounce_ms: int = 30
@@ -96,6 +99,11 @@ class Settings:
             audio_device_sample_rate=int(
                 os.getenv("AUDIO_DEVICE_SAMPLE_RATE", "24000")
             ),
+            bell_output_device=_device_env("BELL_OUTPUT_DEVICE"),
+            bell_device_sample_rate=int(
+                os.getenv("BELL_DEVICE_SAMPLE_RATE", "48000")
+            ),
+            bell_volume=float(os.getenv("BELL_VOLUME", "0.7")),
             mock_gpio=_bool_env("MOCK_GPIO", False),
         )
 
@@ -107,6 +115,9 @@ class Settings:
         if (
             self.sample_rate <= 0
             or self.audio_device_sample_rate <= 0
+            or self.bell_device_sample_rate <= 0
             or self.block_ms <= 0
         ):
             raise ValueError("音声のサンプルレートとブロック時間は正の値が必要です")
+        if not 0 <= self.bell_volume <= 1:
+            raise ValueError("BELL_VOLUMEは0から1の間で指定してください")

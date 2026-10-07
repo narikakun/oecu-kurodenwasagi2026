@@ -2,11 +2,45 @@ import unittest
 
 from array import array
 
-from kuro_sagi_denwa.audio import AudioDevice, resample_pcm16_mono
+from kuro_sagi_denwa.audio import (
+    AudioDevice,
+    AudioDeviceSelector,
+    BellRinger,
+    resample_pcm16_mono,
+)
 from kuro_sagi_denwa.config import Settings
 
 
 class AudioDeviceTest(unittest.TestCase):
+    def test_bell_ringer_uses_rotary_phone_ringtone(self):
+        ringer = BellRinger(Settings(api_key="test"))
+
+        self.assertEqual(ringer.path.name, "Rotary_Phone-Ringtone01-1.mp3")
+        self.assertTrue(ringer.path.is_file())
+
+    def test_device_selector_changes_each_runtime_device(self):
+        settings = Settings(api_key="test")
+        audio = AudioDevice(settings)
+        ringer = BellRinger(settings)
+        selector = AudioDeviceSelector(audio, ringer)
+        selector._devices = lambda: [
+            {"name": "input", "max_input_channels": 1, "max_output_channels": 0},
+            {"name": "handset", "max_input_channels": 0, "max_output_channels": 1},
+            {"name": "bell", "max_input_channels": 0, "max_output_channels": 1},
+        ]
+        selector.enter()
+
+        selector.handle_digit(0)
+        selector.handle_digit(0)
+        selector.handle_digit(1)
+        selector.handle_digit(1)
+        selector.handle_digit(2)
+        selector.handle_digit(2)
+
+        self.assertEqual(audio.input_device, 0)
+        self.assertEqual(audio.output_device, 1)
+        self.assertEqual(ringer.output_device, 2)
+
     def test_clear_input_queue_discards_old_recording(self):
         audio = AudioDevice(Settings(api_key="test"))
         audio.input_queue.put_nowait(b"old audio")

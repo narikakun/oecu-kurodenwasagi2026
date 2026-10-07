@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from enum import Enum
 from typing import Protocol
@@ -22,6 +23,25 @@ class Session(Protocol):
     async def notify_dial(self, digit: int) -> None: ...
 
 
+class Ringer(Protocol):
+    @property
+    def is_ringing(self) -> bool: ...
+
+    async def start(self) -> None: ...
+
+    async def stop(self) -> None: ...
+
+
+class DeviceSelector(Protocol):
+    active: bool
+
+    def enter(self) -> None: ...
+
+    def exit(self) -> None: ...
+
+    def handle_digit(self, digit: int) -> None: ...
+
+
 class AppState(Enum):
     IDLE = "idle"
     CONNECTING = "connecting"
@@ -31,21 +51,79 @@ class AppState(Enum):
 
 
 class PhoneController:
-    def __init__(self, session: Session) -> None:
+    def __init__(
+        self,
+        session: Session,
+        ringer: Ringer | None = None,
+        device_selector: DeviceSelector | None = None,
+    ) -> None:
         self.session = session
+        self.ringer = ringer
+        self.device_selector = device_selector
         self.state = AppState.IDLE
         self.last_digit: int | None = None
+        self._hook_up = False
+        self._ring_delay_task: asyncio.Task[None] | None = None
 
     async def handle(self, event) -> None:
         if event.type == HardwareEventType.HOOK_UP:
+            self._hook_up = True
+            if self.device_selector is not None:
+                self.device_selector.exit()
+            await self._cancel_ring()
             await self._start_conversation()
         elif event.type == HardwareEventType.HOOK_DOWN:
+            self._hook_up = False
             await self._end_conversation()
         elif event.type == HardwareEventType.DIAL:
             self.last_digit = event.digit
             logger.info("ダイヤル入力: %s", event.digit)
-            if event.digit is not None and self.session.is_running:
+            if (
+                event.digit is not None
+                and not self._hook_up
+                and self.device_selector is not None
+                and (self.device_selector.active or self._ringer_is_ringing())
+            ):
+                if not self.device_selector.active:
+                    await self._cancel_ring()
+                    self.device_selector.enter()
+                self.device_selector.handle_digit(event.digit)
+            elif event.digit is not None and not self._hook_up:
+                self._schedule_ring(event.digit)
+            elif event.digit is not None and self.session.is_running:
                 await self.session.notify_dial(event.digit)
+
+    def _ringer_is_ringing(self) -> bool:
+        return self.ringer is not None and self.ringer.is_ringing
+
+    def _schedule_ring(self, delay_seconds: int) -> None:
+        if self.ringer is None:
+            return
+        if self._ring_delay_task is not None:
+            self._ring_delay_task.cancel()
+        self._ring_delay_task = asyncio.create_task(
+            self._ring_after_delay(delay_seconds)
+        )
+        logger.info("%d秒後にベルを鳴らします", delay_seconds)
+
+    async def _ring_after_delay(self, delay_seconds: int) -> None:
+        try:
+            await asyncio.sleep(delay_seconds)
+            if not self._hook_up and self.ringer is not None:
+                await self.ringer.start()
+        except asyncio.CancelledError:
+            return
+        finally:
+            if self._ring_delay_task is asyncio.current_task():
+                self._ring_delay_task = None
+
+    async def _cancel_ring(self) -> None:
+        if self._ring_delay_task is not None:
+            self._ring_delay_task.cancel()
+            await asyncio.gather(self._ring_delay_task, return_exceptions=True)
+            self._ring_delay_task = None
+        if self.ringer is not None:
+            await self.ringer.stop()
 
     async def _start_conversation(self) -> None:
         if self.session.is_running or self.state == AppState.CONNECTING:

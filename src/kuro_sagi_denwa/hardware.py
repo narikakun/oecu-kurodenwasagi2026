@@ -116,10 +116,9 @@ class PhoneHardware:
                     pulse_at = self._dial_pulses.get_nowait()
                 except Empty:
                     break
-                if hook_up:
-                    self.decoder.add_pulse(pulse_at)
+                self.decoder.add_pulse(pulse_at)
 
-            digit = self.decoder.read_digit(now) if hook_up else None
+            digit = self.decoder.read_digit(now)
             if digit is not None:
                 yield HardwareEvent(HardwareEventType.DIAL, digit)
 

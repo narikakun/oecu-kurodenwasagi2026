@@ -6,11 +6,196 @@ import asyncio
 import logging
 import math
 from array import array
+from pathlib import Path
 from typing import Any
 
 from .config import Settings
 
 logger = logging.getLogger(__name__)
+
+
+class BellRinger:
+    """受話器とは別の出力デバイスで黒電話のベル音を繰り返す。"""
+
+    def __init__(self, settings: Settings, path: str | Path | None = None) -> None:
+        self.settings = settings
+        self.path = Path(path) if path else (
+            Path(__file__).parent / "assets" / "audio" / "Rotary_Phone-Ringtone01-1.mp3"
+        )
+        self.output_device = settings.bell_output_device
+        self._task: asyncio.Task[None] | None = None
+
+    @property
+    def is_ringing(self) -> bool:
+        return self._task is not None and not self._task.done()
+
+    async def start(self) -> None:
+        await self.stop()
+        self._task = asyncio.create_task(self._ring_loop())
+        self._task.add_done_callback(self._report_failure)
+
+    @staticmethod
+    def _report_failure(task: asyncio.Task[None]) -> None:
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.error(
+                "ベル音の再生に失敗しました",
+                exc_info=(type(error), error, error.__traceback__),
+            )
+
+    async def stop(self) -> None:
+        if self._task is None:
+            return
+        self._task.cancel()
+        await asyncio.gather(self._task, return_exceptions=True)
+        self._task = None
+
+    async def _ring_loop(self) -> None:
+        import miniaudio
+        import sounddevice as sd
+
+        sound = await asyncio.to_thread(
+            miniaudio.decode_file,
+            str(self.path),
+            output_format=miniaudio.SampleFormat.SIGNED16,
+            nchannels=1,
+            sample_rate=self.settings.bell_device_sample_rate,
+        )
+        samples = array("h", sound.samples)
+        for index, sample in enumerate(samples):
+            samples[index] = max(
+                -32768, min(32767, int(sample * self.settings.bell_volume))
+            )
+        pcm = samples.tobytes()
+        bytes_per_block = (
+            self.settings.bell_device_sample_rate * self.settings.block_ms // 1000 * 2
+        )
+        stream = sd.RawOutputStream(
+            samplerate=self.settings.bell_device_sample_rate,
+            blocksize=self.settings.bell_device_sample_rate
+            * self.settings.block_ms
+            // 1000,
+            channels=1,
+            dtype="int16",
+            device=self.output_device,
+        )
+        try:
+            stream.start()
+            logger.info("ベルを鳴らします")
+            while True:
+                for offset in range(0, len(pcm), bytes_per_block):
+                    await asyncio.to_thread(
+                        stream.write, pcm[offset : offset + bytes_per_block]
+                    )
+        except asyncio.CancelledError:
+            raise
+        finally:
+            await asyncio.to_thread(stream.stop)
+            await asyncio.to_thread(stream.close)
+            logger.info("ベルを停止しました")
+
+
+class AudioDeviceSelector:
+    """ロータリーダイヤルで実行中の音声デバイスを選択する。"""
+
+    TARGETS = {
+        0: ("受話器入力", "input"),
+        1: ("受話器出力", "output"),
+        2: ("ベル出力", "bell"),
+    }
+
+    def __init__(self, audio: AudioDevice, ringer: BellRinger) -> None:
+        self.audio = audio
+        self.ringer = ringer
+        self.active = False
+        self._pending_target: str | None = None
+
+    def show_current(self) -> None:
+        logger.info(
+            "音声デバイス設定: 受話器入力=%s / 受話器出力=%s / ベル出力=%s",
+            self._describe(self.audio.input_device, "input"),
+            self._describe(self.audio.output_device, "output"),
+            self._describe(self.ringer.output_device, "output"),
+        )
+
+    def enter(self) -> None:
+        self.active = True
+        self._pending_target = None
+        logger.info(
+            "音声デバイス設定モード: 0=受話器入力, 1=受話器出力, 2=ベル出力"
+        )
+
+    def exit(self) -> None:
+        if self.active:
+            logger.info("音声デバイス設定モードを終了します")
+        self.active = False
+        self._pending_target = None
+
+    def handle_digit(self, digit: int) -> None:
+        if self._pending_target is None:
+            target = self.TARGETS.get(digit)
+            if target is None:
+                logger.warning("0、1、2のいずれかを回してください")
+                return
+            label, self._pending_target = target
+            logger.info("%sを選択します。次にデバイス番号を回してください", label)
+            self._show_available(self._pending_target)
+            return
+
+        if not self._supports(digit, self._pending_target):
+            logger.warning("デバイス%dは選択した用途では使用できません", digit)
+            self._show_available(self._pending_target)
+            return
+
+        label = next(
+            name for name, target in self.TARGETS.values() if target == self._pending_target
+        )
+        if self._pending_target == "input":
+            self.audio.input_device = digit
+        elif self._pending_target == "output":
+            self.audio.output_device = digit
+        else:
+            self.ringer.output_device = digit
+        logger.info("%sをデバイス%dへ変更しました", label, digit)
+        self._pending_target = None
+        self.show_current()
+        logger.info("続けて0、1、2を回すか、受話器を上げて設定を終了してください")
+
+    @staticmethod
+    def _devices() -> list[dict[str, Any]]:
+        import sounddevice as sd
+
+        return list(sd.query_devices())
+
+    def _show_available(self, target: str) -> None:
+        channel_key = "max_input_channels" if target == "input" else "max_output_channels"
+        available = [
+            f"{index}={device['name']}"
+            for index, device in enumerate(self._devices())
+            if index <= 9 and device[channel_key] > 0
+        ]
+        logger.info("選択可能なデバイス: %s", ", ".join(available) or "なし")
+
+    def _supports(self, index: int, target: str) -> bool:
+        devices = self._devices()
+        if not 0 <= index < len(devices):
+            return False
+        channel_key = "max_input_channels" if target == "input" else "max_output_channels"
+        return devices[index][channel_key] > 0
+
+    def _describe(self, device: str | int | None, target: str) -> str:
+        try:
+            import sounddevice as sd
+
+            if device is None:
+                default_input, default_output = sd.default.device
+                device = default_input if target == "input" else default_output
+            info = sd.query_devices(device)
+            return f"{device} ({info['name']})"
+        except Exception as error:
+            return f"{device!r} (取得失敗: {error})"
 
 
 def resample_pcm16_mono(pcm: bytes, source_rate: int, target_rate: int) -> bytes:
@@ -41,6 +226,8 @@ def resample_pcm16_mono(pcm: bytes, source_rate: int, target_rate: int) -> bytes
 class AudioDevice:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self.input_device = settings.audio_input_device
+        self.output_device = settings.audio_output_device
         self.input_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=100)
         self.output_queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=200)
         self._input_stream: Any = None
@@ -82,7 +269,7 @@ class AudioDevice:
             blocksize=frames,
             channels=1,
             dtype="int16",
-            device=self.settings.audio_input_device,
+            device=self.input_device,
             callback=self._capture_callback,
         )
         self._output_stream = sd.RawOutputStream(
@@ -90,7 +277,7 @@ class AudioDevice:
             blocksize=frames,
             channels=1,
             dtype="int16",
-            device=self.settings.audio_output_device,
+            device=self.output_device,
         )
         self._input_stream.start()
         self._output_stream.start()

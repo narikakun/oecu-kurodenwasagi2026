@@ -26,12 +26,18 @@ class LoadEnvFileTest(unittest.TestCase):
             "OPENAI_API_KEY": "test-secret",
             "LIVE_VOICE": "marin",
             "AUDIO_DEVICE_SAMPLE_RATE": "48000",
+            "BELL_OUTPUT_DEVICE": "2",
+            "BELL_DEVICE_SAMPLE_RATE": "48000",
+            "BELL_VOLUME": "0.6",
         }
         with patch.dict(os.environ, values, clear=True):
             settings = Settings.from_env()
 
         self.assertEqual(settings.live_voice, "marin")
         self.assertEqual(settings.audio_device_sample_rate, 48_000)
+        self.assertEqual(settings.bell_output_device, 2)
+        self.assertEqual(settings.bell_device_sample_rate, 48_000)
+        self.assertEqual(settings.bell_volume, 0.6)
 
     def test_existing_environment_variable_has_priority(self):
         with tempfile.TemporaryDirectory() as directory:

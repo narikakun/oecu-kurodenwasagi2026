@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from .audio import AudioDevice
+from .audio import AudioDevice, AudioDeviceSelector, BellRinger
 from .config import Settings, load_env_file
 from .controller import PhoneController
 from .hardware import MockPhoneHardware, PhoneHardware
@@ -19,13 +19,17 @@ async def run() -> None:
 
     hardware = MockPhoneHardware() if settings.mock_gpio else PhoneHardware(settings)
     audio = AudioDevice(settings)
+    ringer = BellRinger(settings)
+    device_selector = AudioDeviceSelector(audio, ringer)
+    device_selector.show_current()
     session = GPTLiveSession(settings, audio)
-    controller = PhoneController(session)
+    controller = PhoneController(session, ringer, device_selector)
 
     try:
         async for event in hardware.events():
             await controller.handle(event)
     finally:
+        await ringer.stop()
         await session.stop()
         hardware.close()
 
