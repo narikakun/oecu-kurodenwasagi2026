@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from queue import Empty, SimpleQueue
 from dataclasses import dataclass
 from enum import Enum
 from time import monotonic
@@ -50,6 +51,7 @@ class PhoneHardware:
             debounce_seconds=settings.dial_debounce_ms / 1000,
             digit_timeout_seconds=settings.digit_timeout_ms / 1000,
         )
+        self._dial_pulses: SimpleQueue[float] = SimpleQueue()
         self._owns_inputs = hook_input is None and dial_input is None
 
     def open(self) -> None:
@@ -59,27 +61,30 @@ class PhoneHardware:
             raise RuntimeError("MOCK_GPIOではMockPhoneHardwareを使用してください")
 
         # gpiozeroをここで読み込むことで、開発PCでも単体テストしやすくする。
-        from gpiozero import DigitalInputDevice
+        from gpiozero import Button, DigitalInputDevice
 
         self.hook_input = DigitalInputDevice(self.settings.hook_gpio, pull_up=True)
-        self.dial_input = DigitalInputDevice(self.settings.dial_gpio, pull_up=True)
+        self.dial_input = Button(
+            self.settings.dial_gpio,
+            pull_up=True,
+            bounce_time=self.settings.dial_debounce_ms / 1000,
+        )
+        self.dial_input.when_pressed = self._on_dial_pulse
+
+    def _on_dial_pulse(self) -> None:
+        """gpiozeroのコールバックスレッドからパルス時刻だけを渡す。"""
+        self._dial_pulses.put(monotonic())
 
     def _hook_is_up(self) -> bool:
         assert self.hook_input is not None
         is_low = self.hook_input.value == 0
         return is_low == self.settings.hook_lifted_when_low
 
-    def _dial_is_pulse(self) -> bool:
-        assert self.dial_input is not None
-        is_low = self.dial_input.value == 0
-        return is_low == self.settings.dial_pulse_when_low
-
     async def events(self):
         self.open()
         assert self.hook_input is not None and self.dial_input is not None
 
         hook_up = self._hook_is_up()
-        dial_active = self._dial_is_pulse()
         hook_candidate = hook_up
         hook_changed_at = monotonic()
 
@@ -106,11 +111,13 @@ class PhoneHardware:
                         else HardwareEventType.HOOK_DOWN
                     )
 
-            current_dial = self._dial_is_pulse()
-            # パルスが非作動から作動へ変わった瞬間だけ数える。
-            if hook_up and current_dial and not dial_active:
-                self.decoder.add_pulse(now)
-            dial_active = current_dial
+            while True:
+                try:
+                    pulse_at = self._dial_pulses.get_nowait()
+                except Empty:
+                    break
+                if hook_up:
+                    self.decoder.add_pulse(pulse_at)
 
             digit = self.decoder.read_digit(now) if hook_up else None
             if digit is not None:
@@ -145,4 +152,3 @@ class MockPhoneHardware:
 
     def close(self) -> None:
         pass
-

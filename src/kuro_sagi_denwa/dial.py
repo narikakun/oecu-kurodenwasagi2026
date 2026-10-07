@@ -9,7 +9,7 @@ from dataclasses import dataclass
 class DialDecoder:
     """パルス数を数え、一定時間の無入力後に一桁を確定する。"""
 
-    debounce_seconds: float = 0.012
+    debounce_seconds: float = 0.005
     digit_timeout_seconds: float = 0.150
     pulse_count: int = 0
     last_pulse_at: float | None = None
@@ -44,4 +44,3 @@ class DialDecoder:
     def reset(self) -> None:
         self.pulse_count = 0
         self.last_pulse_at = None
-
