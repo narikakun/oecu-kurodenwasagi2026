@@ -16,6 +16,11 @@ class Session(Protocol):
     @property
     def is_running(self) -> bool: ...
 
+    @property
+    def is_conversation_active(self) -> bool: ...
+
+    async def prepare(self) -> None: ...
+
     async def start(self) -> None: ...
 
     async def stop(self) -> None: ...
@@ -90,9 +95,12 @@ class PhoneController:
             ):
                 if not self.device_selector.active:
                     await self._cancel_ring()
+                    if self.session.is_running:
+                        await self.session.stop()
                     self.device_selector.enter()
                     self._display_state("settings", "音声設定中")
-                self.device_selector.handle_digit(event.digit)
+                else:
+                    self.device_selector.handle_digit(event.digit)
             elif event.digit is not None and not self._hook_up:
                 self._schedule_ring(event.digit)
             elif event.digit is not None and self.session.is_running:
@@ -116,6 +124,14 @@ class PhoneController:
         try:
             await asyncio.sleep(delay_seconds)
             if not self._hook_up and self.ringer is not None:
+                try:
+                    await self.session.prepare()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception(
+                        "GPT-Liveの事前接続に失敗したため、受話器を上げた後に再接続します"
+                    )
                 await self.ringer.start()
                 self._display_state("ringing", "呼び出し中")
         except asyncio.CancelledError:
@@ -133,7 +149,7 @@ class PhoneController:
             await self.ringer.stop()
 
     async def _start_conversation(self) -> None:
-        if self.session.is_running or self.state == AppState.CONNECTING:
+        if self.session.is_conversation_active or self.state == AppState.CONNECTING:
             return
         self.state = AppState.CONNECTING
         self._display_state("connecting", "接続中")

@@ -29,10 +29,8 @@ class GPTLiveSession:
         "詳しい確認が必要な質問はResponsesバックエンドへ委譲し、結果が届いたら必ず会話を"
         "再開して短く回答してください。結果を待たないまま会話を終わらせないでください。"
     )
-    GREETING_INSTRUCTION = (
-        "会話の最初の発話として、今すぐ日本語で「もしもし？」と正確に一度だけ"
-        "話してください。他の言葉は付けず、その後は相手の返答を待ってください。"
-    )
+    GREETING_COMMENTARY = "もしもし？"
+    GREETING_TIMEOUT_SECONDS = 5
     TRANSCRIPT_IDLE_SECONDS = 1.0
     TRANSCRIPT_SENTENCE_SECONDS = 0.15
 
@@ -44,6 +42,7 @@ class GPTLiveSession:
         self._sender_task: asyncio.Task[None] | None = None
         self._receiver_task: asyncio.Task[None] | None = None
         self._closed_event = asyncio.Event()
+        self._prepared = False
         self._transcript_buffers: dict[str, str] = {}
         self._transcript_flush_handles: dict[str, asyncio.TimerHandle] = {}
 
@@ -51,14 +50,19 @@ class GPTLiveSession:
     def is_running(self) -> bool:
         return self.websocket is not None
 
-    async def start(self) -> None:
-        if self.is_running:
+    @property
+    def is_conversation_active(self) -> bool:
+        return self._receiver_task is not None
+
+    async def prepare(self) -> None:
+        """ベル中に接続だけを済ませ、受話器を上げるまで入力をミュートする。"""
+        if self._prepared and self.websocket is not None:
             return
 
         import websockets
 
         try:
-            await self.audio.start()
+            logger.info("GPT-Liveセッションへ接続します")
             self._closed_event.clear()
             self.websocket = await websockets.connect(
                 self.URL,
@@ -67,18 +71,47 @@ class GPTLiveSession:
             )
             await self._send_event(self._session_start_event())
             await self._wait_until_started()
+            await self._send_event(
+                {"type": "session.input_audio.mute", "event_id": "pre_ring_mute"}
+            )
+            await self._wait_for_ack("session.input_audio.muted", "pre_ring_mute")
+            self._prepared = True
+            logger.info("GPT-Liveセッションを開始しました（入力ミュート中）")
+        except asyncio.CancelledError:
+            logger.info("GPT-Liveセッションの開始を中止します")
+            await self._abort_start()
+            raise
+        except Exception:
+            logger.exception("GPT-Liveセッションを開始できませんでした")
+            await self._abort_start()
+            raise
 
-            # 挨拶指示を音声入力より先に送信する。ただしGPT-Liveのタイムラインを
-            # 進めるため、挨拶の処理中も入力ストリームは継続する。
+    async def start(self) -> None:
+        if self.is_conversation_active:
+            return
+
+        try:
+            await self.prepare()
+            await self.audio.start()
+
+            # GPT-Liveのタイムラインを進めるため、入力音声の送信を開始してから
+            # 挨拶指示を送り、挨拶の処理中も入力ストリームを継続する。
             self.audio.clear_input_queue()
-            await self._send_event(self._greeting_event())
             self._sender_task = asyncio.create_task(self._send_audio_loop())
             self._sender_task.add_done_callback(self._report_sender_failure)
+            await self._send_event(
+                {"type": "session.input_audio.unmute", "event_id": "handset_up_unmute"}
+            )
+            await self._wait_for_ack(
+                "session.input_audio.unmuted", "handset_up_unmute"
+            )
+            await self._send_event(self._greeting_event())
             await self._wait_until_greeting_accepted()
 
             # 挨拶後は通常の受信ループへ引き継ぐ。
             self._receiver_task = asyncio.create_task(self._receive_loop())
             self._receiver_task.add_done_callback(self._report_receiver_failure)
+            logger.info("GPT-Liveの通話を開始しました")
         except Exception:
             await self._abort_start()
             raise
@@ -120,12 +153,12 @@ class GPTLiveSession:
             },
         }
 
-    def _greeting_event(self) -> dict[str, Any]:
+    def _greeting_event(self, event_id: str = "initial_greeting") -> dict[str, Any]:
         return {
-            "type": "session.instructions.append",
-            "event_id": "initial_greeting",
+            "type": "session.commentary.append",
+            "event_id": event_id,
             "delegation_id": None,
-            "content": self.GREETING_INSTRUCTION,
+            "content": self.GREETING_COMMENTARY,
         }
 
     async def _send_event(self, event: dict[str, Any]) -> None:
@@ -225,19 +258,63 @@ class GPTLiveSession:
                 message = event.get("error", {}).get("message", "不明なエラー")
                 raise RuntimeError(f"GPT-Liveの開始に失敗しました: {message}")
 
-    async def _wait_until_greeting_accepted(self) -> None:
-        """最初の挨拶指示が受理され、生成済み音声が再生されるまで待つ。"""
+    async def _wait_for_ack(self, event_type: str, client_event_id: str) -> None:
         assert self.websocket is not None
         while True:
             raw = await asyncio.wait_for(self.websocket.recv(), timeout=15)
             event = json.loads(raw)
             await self._handle_server_event(event)
             if (
-                event.get("type") == "session.instructions.appended"
-                and event.get("client_event_id") == "initial_greeting"
+                event.get("type") == event_type
+                and event.get("client_event_id") == client_event_id
             ):
-                await self.audio.wait_until_played()
                 return
+
+    async def _wait_until_greeting_accepted(self) -> None:
+        """挨拶の受理、音声出力、文字起こしの「もしもし」を確認する。"""
+        assert self.websocket is not None
+        commentary_accepted = False
+        audio_received = False
+        greeting_transcript = ""
+        greeting_event_ids = {"initial_greeting"}
+        retried = False
+        while not (
+            commentary_accepted
+            and audio_received
+            and "もしもし" in greeting_transcript
+        ):
+            try:
+                raw = await asyncio.wait_for(
+                    self.websocket.recv(), timeout=self.GREETING_TIMEOUT_SECONDS
+                )
+            except asyncio.TimeoutError:
+                if retried:
+                    raise RuntimeError(
+                        "GPT-Liveから初回挨拶「もしもし？」が返りませんでした"
+                    )
+                retry_event_id = "initial_greeting_retry"
+                greeting_event_ids.add(retry_event_id)
+                logger.warning(
+                    "GPT-Liveの初回挨拶が届かないため、挨拶を再送します"
+                )
+                await self._send_event(self._greeting_event(retry_event_id))
+                retried = True
+                continue
+            event = json.loads(raw)
+            await self._handle_server_event(event)
+            if (
+                event.get("type") == "session.commentary.appended"
+                and event.get("client_event_id") in greeting_event_ids
+            ):
+                commentary_accepted = True
+            elif event.get("type") == "session.output_audio.delta":
+                audio_received = True
+            elif event.get("type") == "session.output_transcript.delta":
+                delta = event.get("delta")
+                if isinstance(delta, str):
+                    greeting_transcript += delta
+        await self.audio.wait_until_played()
+        logger.info("GPT-Liveの初回挨拶を確認しました: %s", greeting_transcript)
 
     async def _send_audio_loop(self) -> None:
         assert self.websocket is not None
@@ -265,6 +342,15 @@ class GPTLiveSession:
         finally:
             self._flush_all_transcripts()
             self._closed_event.set()
+
+    async def _wait_until_closed(self) -> None:
+        """受信ループ開始前の事前接続セッションを正常終了まで読み取る。"""
+        assert self.websocket is not None
+        while True:
+            raw = await self.websocket.recv()
+            event = json.loads(raw)
+            if await self._handle_server_event(event):
+                return
 
     async def _handle_server_event(self, event: dict[str, Any]) -> bool:
         """通常受信と開始時挨拶で共通のサーバーイベントを処理する。"""
@@ -297,9 +383,13 @@ class GPTLiveSession:
         if self.websocket is not None:
             await self.websocket.close()
             self.websocket = None
+        self._prepared = False
         await self.audio.stop()
 
     async def stop(self) -> None:
+        was_running = self.websocket is not None
+        if was_running:
+            logger.info("GPT-Liveセッションを終了します")
         if self._sender_task is not None:
             self._sender_task.cancel()
             await asyncio.gather(self._sender_task, return_exceptions=True)
@@ -308,7 +398,10 @@ class GPTLiveSession:
         if self.websocket is not None:
             try:
                 await self._send_event({"type": "session.close"})
-                await asyncio.wait_for(self._closed_event.wait(), timeout=3)
+                if self._receiver_task is None:
+                    await asyncio.wait_for(self._wait_until_closed(), timeout=3)
+                else:
+                    await asyncio.wait_for(self._closed_event.wait(), timeout=3)
             except Exception:
                 pass
 
@@ -321,4 +414,7 @@ class GPTLiveSession:
             await self.websocket.close()
             self.websocket = None
 
+        self._prepared = False
         await self.audio.stop()
+        if was_running:
+            logger.info("GPT-Liveセッションを終了しました")

@@ -1,8 +1,10 @@
 import asyncio
 import base64
 import json
+import sys
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from kuro_sagi_denwa.config import Settings
 from kuro_sagi_denwa.live import GPTLiveSession
@@ -14,6 +16,14 @@ class DummyAudio:
         self.played = []
         self.wait_count = 0
         self.clear_count = 0
+        self.start_count = 0
+        self.stop_count = 0
+
+    async def start(self):
+        self.start_count += 1
+
+    async def stop(self):
+        self.stop_count += 1
 
     async def play(self, data):
         self.played.append(data)
@@ -29,12 +39,19 @@ class FakeWebSocket:
     def __init__(self, received=None):
         self.sent = []
         self.received = list(received or [])
+        self.close_count = 0
 
     async def send(self, value):
         self.sent.append(json.loads(value))
 
     async def recv(self):
-        return json.dumps(self.received.pop(0))
+        event = self.received.pop(0)
+        if isinstance(event, BaseException):
+            raise event
+        return json.dumps(event)
+
+    async def close(self):
+        self.close_count += 1
 
 
 class FakeDisplay:
@@ -95,14 +112,36 @@ class GPTLiveSessionTest(unittest.TestCase):
 
         event = session._greeting_event()
 
-        self.assertEqual(event["type"], "session.instructions.append")
+        self.assertEqual(event["type"], "session.commentary.append")
         self.assertIsNone(event["delegation_id"])
-        self.assertIn("「もしもし？」と正確に一度だけ", event["content"])
-        self.assertIn("会話の最初の発話", event["content"])
-        self.assertIn("相手の返答を待って", event["content"])
+        self.assertEqual(event["content"], "もしもし？")
 
 
 class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
+    async def test_prepare_logs_session_start(self):
+        audio = DummyAudio()
+        session = GPTLiveSession(Settings(api_key="test-key"), audio)
+        websocket = FakeWebSocket(
+            [
+                {"type": "session.started"},
+                {
+                    "type": "session.input_audio.muted",
+                    "client_event_id": "pre_ring_mute",
+                },
+            ]
+        )
+
+        fake_websockets = SimpleNamespace(
+            connect=AsyncMock(return_value=websocket)
+        )
+        with patch.dict(sys.modules, {"websockets": fake_websockets}):
+            with self.assertLogs("kuro_sagi_denwa.live", level="INFO") as logs:
+                await session.prepare()
+
+        self.assertIn("GPT-Liveセッションへ接続します", logs.output[0])
+        self.assertIn("GPT-Liveセッションを開始しました", logs.output[-1])
+        self.assertTrue(session._prepared)
+
     async def test_waits_for_initial_greeting_before_conversation(self):
         audio = DummyAudio()
         session = GPTLiveSession(Settings(api_key="test-key"), audio)
@@ -113,9 +152,10 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
                     "delta": base64.b64encode(b"moshimoshi").decode("ascii"),
                 },
                 {
-                    "type": "session.instructions.appended",
+                    "type": "session.commentary.appended",
                     "client_event_id": "initial_greeting",
                 },
+                {"type": "session.output_transcript.delta", "delta": "もしもし？"},
             ]
         )
 
@@ -123,6 +163,94 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(audio.played, [b"moshimoshi"])
         self.assertEqual(audio.wait_count, 1)
+
+    async def test_waits_for_matching_audio_control_acknowledgement(self):
+        session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio())
+        session.websocket = FakeWebSocket(
+            [
+                {
+                    "type": "session.input_audio.muted",
+                    "client_event_id": "different_event",
+                },
+                {
+                    "type": "session.input_audio.muted",
+                    "client_event_id": "pre_ring_mute",
+                },
+            ]
+        )
+
+        await session._wait_for_ack("session.input_audio.muted", "pre_ring_mute")
+
+    async def test_stop_closes_prepared_session_without_receiver_loop(self):
+        audio = DummyAudio()
+        session = GPTLiveSession(Settings(api_key="test-key"), audio)
+        websocket = FakeWebSocket([{"type": "session.closed"}])
+        session.websocket = websocket
+        session._prepared = True
+
+        with self.assertLogs("kuro_sagi_denwa.live", level="INFO") as logs:
+            await session.stop()
+
+        self.assertEqual(websocket.sent, [{"type": "session.close"}])
+        self.assertEqual(websocket.close_count, 1)
+        self.assertEqual(audio.stop_count, 1)
+        self.assertIsNone(session.websocket)
+        self.assertFalse(session._prepared)
+        self.assertIn("GPT-Liveセッションを終了します", logs.output[0])
+        self.assertIn("GPT-Liveセッションを終了しました", logs.output[-1])
+
+    async def test_commentary_acknowledgement_alone_does_not_finish_greeting(self):
+        audio = DummyAudio()
+        session = GPTLiveSession(Settings(api_key="test-key"), audio)
+        session.websocket = FakeWebSocket(
+            [
+                {
+                    "type": "session.commentary.appended",
+                    "client_event_id": "initial_greeting",
+                },
+                {
+                    "type": "session.output_audio.delta",
+                    "delta": base64.b64encode(b"moshimoshi").decode("ascii"),
+                },
+                {"type": "session.output_transcript.delta", "delta": "もしもし"},
+            ]
+        )
+
+        await session._wait_until_greeting_accepted()
+
+        self.assertEqual(audio.played, [b"moshimoshi"])
+        self.assertEqual(audio.wait_count, 1)
+
+    async def test_retries_greeting_once_when_no_speech_arrives(self):
+        audio = DummyAudio()
+        session = GPTLiveSession(Settings(api_key="test-key"), audio)
+        session.websocket = FakeWebSocket(
+            [
+                {
+                    "type": "session.commentary.appended",
+                    "client_event_id": "initial_greeting",
+                },
+                asyncio.TimeoutError(),
+                {
+                    "type": "session.commentary.appended",
+                    "client_event_id": "initial_greeting_retry",
+                },
+                {
+                    "type": "session.output_audio.delta",
+                    "delta": base64.b64encode(b"moshimoshi").decode("ascii"),
+                },
+                {"type": "session.output_transcript.delta", "delta": "もしもし"},
+            ]
+        )
+
+        with self.assertLogs("kuro_sagi_denwa.live", level="WARNING") as logs:
+            await session._wait_until_greeting_accepted()
+
+        self.assertEqual(
+            session.websocket.sent,
+            [session._greeting_event("initial_greeting_retry")],
+        )
+        self.assertIn("挨拶を再送します", logs.output[0])
 
     async def test_logs_only_input_and_output_transcripts(self):
         display = FakeDisplay()

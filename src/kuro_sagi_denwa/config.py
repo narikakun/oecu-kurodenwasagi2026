@@ -75,6 +75,7 @@ class Settings:
     audio_input_device: str | int | None = None
     audio_output_device: str | int | None = None
     audio_device_sample_rate: int = 48_000
+    audio_settings_file: str = "~/.config/kuro-sagi-denwa/audio-settings.json"
     bell_output_device: str | int | None = None
     bell_device_sample_rate: int = 48_000
     bell_volume: float = 0.7
@@ -109,6 +110,10 @@ class Settings:
             audio_device_sample_rate=int(
                 os.getenv("AUDIO_DEVICE_SAMPLE_RATE", "48000")
             ),
+            audio_settings_file=os.getenv(
+                "AUDIO_SETTINGS_FILE",
+                "~/.config/kuro-sagi-denwa/audio-settings.json",
+            ).strip(),
             bell_output_device=_device_env("BELL_OUTPUT_DEVICE"),
             bell_device_sample_rate=int(
                 os.getenv("BELL_DEVICE_SAMPLE_RATE", "48000")

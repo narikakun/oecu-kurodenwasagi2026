@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 from array import array
@@ -23,6 +24,7 @@ class BellRinger:
             Path(__file__).parent / "assets" / "audio" / "Rotary_Phone-Ringtone01-1.mp3"
         )
         self.output_device = settings.bell_output_device
+        self.sample_rate = settings.bell_device_sample_rate
         self._task: asyncio.Task[None] | None = None
 
     @property
@@ -61,7 +63,7 @@ class BellRinger:
             str(self.path),
             output_format=miniaudio.SampleFormat.SIGNED16,
             nchannels=1,
-            sample_rate=self.settings.bell_device_sample_rate,
+            sample_rate=self.sample_rate,
         )
         samples = array("h", sound.samples)
         for index, sample in enumerate(samples):
@@ -70,13 +72,11 @@ class BellRinger:
             )
         pcm = samples.tobytes()
         bytes_per_block = (
-            self.settings.bell_device_sample_rate * self.settings.block_ms // 1000 * 2
+            self.sample_rate * self.settings.block_ms // 1000 * 2
         )
         stream = sd.RawOutputStream(
-            samplerate=self.settings.bell_device_sample_rate,
-            blocksize=self.settings.bell_device_sample_rate
-            * self.settings.block_ms
-            // 1000,
+            samplerate=self.sample_rate,
+            blocksize=self.sample_rate * self.settings.block_ms // 1000,
             channels=1,
             dtype="int16",
             device=self.output_device,
@@ -106,17 +106,55 @@ class AudioDeviceSelector:
         2: ("ベル出力", "bell"),
     }
 
-    def __init__(self, audio: AudioDevice, ringer: BellRinger, display: Any = None) -> None:
+    def __init__(
+        self,
+        audio: AudioDevice,
+        ringer: BellRinger,
+        display: Any = None,
+        settings_path: str | Path | None = None,
+    ) -> None:
         self.audio = audio
         self.ringer = ringer
         self.display = display
+        self.settings_path = Path(
+            settings_path or audio.settings.audio_settings_file
+        ).expanduser()
         self.active = False
         self._pending_target: str | None = None
 
+    def restore(self) -> None:
+        """保存したデバイスを復元し、見つからない項目はOS既定へ戻す。"""
+        try:
+            saved = json.loads(self.settings_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return
+        except (OSError, json.JSONDecodeError, TypeError) as error:
+            logger.warning("音声デバイス設定を読み込めませんでした: %s", error)
+            return
+
+        try:
+            devices = self._devices()
+        except Exception as error:
+            logger.warning("音声デバイス一覧を取得できないため保存設定を復元しません: %s", error)
+            return
+        for target in ("input", "output", "bell"):
+            name = saved.get(target)
+            index = self._find_device(devices, name, target)
+            if index is None:
+                logger.warning(
+                    "保存した%sデバイスが見つからないためOSの既定へ戻します: %r",
+                    self._target_label(target),
+                    name,
+                )
+                self._apply_default(target)
+            else:
+                self._apply_device(target, index, self._device_sample_rate(devices[index]))
+        self._save()
+
     def show_current(self) -> None:
-        input_description = self._describe(self.audio.input_device, "input")
-        output_description = self._describe(self.audio.output_device, "output")
-        bell_description = self._describe(self.ringer.output_device, "output")
+        input_description, output_description, bell_description = (
+            self._current_descriptions()
+        )
         logger.info(
             "音声デバイス設定: 受話器入力=%s / 受話器出力=%s / ベル出力=%s",
             input_description,
@@ -136,9 +174,7 @@ class AudioDeviceSelector:
         logger.info(
             "音声デバイス設定モード: 0=受話器入力, 1=受話器出力, 2=ベル出力"
         )
-        self._show_on_display(
-            "音声デバイス設定中\n0：受話器入力　1：受話器出力　2：ベル出力"
-        )
+        self._show_menu()
 
     def exit(self) -> None:
         if self.active:
@@ -167,16 +203,38 @@ class AudioDeviceSelector:
         label = next(
             name for name, target in self.TARGETS.values() if target == self._pending_target
         )
-        if self._pending_target == "input":
-            self.audio.input_device = digit
-        elif self._pending_target == "output":
-            self.audio.output_device = digit
-        else:
-            self.ringer.output_device = digit
-        logger.info("%sをデバイス%dへ変更しました", label, digit)
+        sample_rate = self._default_sample_rate(digit)
+        self._apply_device(self._pending_target, digit, sample_rate)
+        self._save()
+        logger.info(
+            "%sをデバイス%d（%d Hz）へ変更しました",
+            label,
+            digit,
+            sample_rate,
+        )
         self._pending_target = None
-        self.show_current()
+        self._show_menu()
         logger.info("続けて0、1、2を回すか、受話器を上げて設定を終了してください")
+
+    def _show_menu(self) -> None:
+        input_description, output_description, bell_description = (
+            self._current_descriptions()
+        )
+        self._show_on_display(
+            "音声デバイス設定\n"
+            f"現在の受話器入力：{input_description} / {self.audio.input_sample_rate} Hz\n"
+            f"現在の受話器出力：{output_description} / {self.audio.output_sample_rate} Hz\n"
+            f"現在のベル出力：{bell_description} / {self.ringer.sample_rate} Hz\n\n"
+            "変更する項目をダイヤルしてください\n"
+            "0：受話器入力　1：受話器出力　2：ベル出力"
+        )
+
+    def _current_descriptions(self) -> tuple[str, str, str]:
+        return (
+            self._describe(self.audio.input_device, "input"),
+            self._describe(self.audio.output_device, "output"),
+            self._describe(self.ringer.output_device, "output"),
+        )
 
     @staticmethod
     def _devices() -> list[dict[str, Any]]:
@@ -204,6 +262,99 @@ class AudioDeviceSelector:
             return False
         channel_key = "max_input_channels" if target == "input" else "max_output_channels"
         return devices[index][channel_key] > 0
+
+    def _default_sample_rate(self, index: int) -> int:
+        return self._device_sample_rate(self._devices()[index])
+
+    @staticmethod
+    def _device_sample_rate(device: dict[str, Any]) -> int:
+        return round(float(device["default_samplerate"]))
+
+    @staticmethod
+    def _target_label(target: str) -> str:
+        return {"input": "受話器入力", "output": "受話器出力", "bell": "ベル出力"}[target]
+
+    @staticmethod
+    def _find_device(
+        devices: list[dict[str, Any]], name: Any, target: str
+    ) -> int | None:
+        if not isinstance(name, str) or not name:
+            return None
+        channel_key = "max_input_channels" if target == "input" else "max_output_channels"
+        return next(
+            (
+                index
+                for index, device in enumerate(devices)
+                if device.get("name") == name and device.get(channel_key, 0) > 0
+            ),
+            None,
+        )
+
+    def _apply_device(self, target: str, device: int | None, sample_rate: int) -> None:
+        if target == "input":
+            self.audio.input_device = device
+            self.audio.input_sample_rate = sample_rate
+        elif target == "output":
+            self.audio.output_device = device
+            self.audio.output_sample_rate = sample_rate
+        else:
+            self.ringer.output_device = device
+            self.ringer.sample_rate = sample_rate
+
+    def _apply_default(self, target: str) -> None:
+        import sounddevice as sd
+
+        kind = "input" if target == "input" else "output"
+        try:
+            info = sd.query_devices(kind=kind)
+            sample_rate = self._device_sample_rate(info)
+        except Exception as error:
+            logger.warning(
+                "%sの既定サンプルレートを取得できないため設定値を使います: %s",
+                self._target_label(target),
+                error,
+            )
+            sample_rate = (
+                self.audio.input_sample_rate
+                if target == "input"
+                else self.audio.output_sample_rate
+                if target == "output"
+                else self.ringer.sample_rate
+            )
+        self._apply_device(target, None, sample_rate)
+
+    def _selected_name(self, target: str) -> str | None:
+        import sounddevice as sd
+
+        device = (
+            self.audio.input_device
+            if target == "input"
+            else self.audio.output_device
+            if target == "output"
+            else self.ringer.output_device
+        )
+        kind = "input" if target == "input" else "output"
+        try:
+            return str(sd.query_devices(device, kind=kind)["name"])
+        except Exception as error:
+            logger.warning("%sの名前を取得できませんでした: %s", self._target_label(target), error)
+            return None
+
+    def _save(self) -> None:
+        data = {
+            target: self._selected_name(target)
+            for target in ("input", "output", "bell")
+        }
+        try:
+            self.settings_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary_path = self.settings_path.with_suffix(self.settings_path.suffix + ".tmp")
+            temporary_path.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            temporary_path.replace(self.settings_path)
+        except OSError as error:
+            logger.warning("音声デバイス設定を保存できませんでした: %s", error)
 
     def _describe(self, device: str | int | None, target: str) -> str:
         try:
@@ -248,6 +399,8 @@ class AudioDevice:
         self.settings = settings
         self.input_device = settings.audio_input_device
         self.output_device = settings.audio_output_device
+        self.input_sample_rate = settings.audio_device_sample_rate
+        self.output_sample_rate = settings.audio_device_sample_rate
         self.input_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=100)
         self.output_queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=200)
         self._input_stream: Any = None
@@ -263,7 +416,7 @@ class AudioDevice:
             return
         data = resample_pcm16_mono(
             bytes(indata),
-            self.settings.audio_device_sample_rate,
+            self.input_sample_rate,
             self.settings.sample_rate,
         )
 
@@ -282,19 +435,20 @@ class AudioDevice:
         import sounddevice as sd
 
         self._loop = asyncio.get_running_loop()
-        frames = self.settings.audio_device_sample_rate * self.settings.block_ms // 1000
+        input_frames = self.input_sample_rate * self.settings.block_ms // 1000
+        output_frames = self.output_sample_rate * self.settings.block_ms // 1000
 
         self._input_stream = sd.RawInputStream(
-            samplerate=self.settings.audio_device_sample_rate,
-            blocksize=frames,
+            samplerate=self.input_sample_rate,
+            blocksize=input_frames,
             channels=1,
             dtype="int16",
             device=self.input_device,
             callback=self._capture_callback,
         )
         self._output_stream = sd.RawOutputStream(
-            samplerate=self.settings.audio_device_sample_rate,
-            blocksize=frames,
+            samplerate=self.output_sample_rate,
+            blocksize=output_frames,
             channels=1,
             dtype="int16",
             device=self.output_device,
@@ -314,7 +468,7 @@ class AudioDevice:
                 device_data = resample_pcm16_mono(
                     data,
                     self.settings.sample_rate,
-                    self.settings.audio_device_sample_rate,
+                    self.output_sample_rate,
                 )
                 await asyncio.to_thread(self._output_stream.write, device_data)
             self.output_queue.task_done()

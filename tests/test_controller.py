@@ -9,18 +9,30 @@ class FakeSession:
         self.running = False
         self.start_count = 0
         self.stop_count = 0
+        self.prepare_count = 0
         self.digits = []
+        self.active = False
 
     @property
     def is_running(self):
         return self.running
 
+    @property
+    def is_conversation_active(self):
+        return self.active
+
+    async def prepare(self):
+        self.running = True
+        self.prepare_count += 1
+
     async def start(self):
         self.running = True
+        self.active = True
         self.start_count += 1
 
     async def stop(self):
         self.running = False
+        self.active = False
         self.stop_count += 1
 
     async def notify_dial(self, digit):
@@ -120,6 +132,7 @@ class PhoneControllerTest(unittest.IsolatedAsyncioTestCase):
         await ring_task
 
         self.assertEqual(ringer.start_count, 1)
+        self.assertEqual(session.prepare_count, 1)
         self.assertEqual(session.start_count, 0)
 
     async def test_lifting_handset_cancels_bell_and_starts_conversation(self):
@@ -155,11 +168,19 @@ class PhoneControllerTest(unittest.IsolatedAsyncioTestCase):
         selector = FakeDeviceSelector()
         controller = PhoneController(session, ringer, selector)
         await controller.handle(HardwareEvent(HardwareEventType.HOOK_DOWN))
+        await session.prepare()
         await ringer.start()
 
         await controller.handle(HardwareEvent(HardwareEventType.DIAL, 2))
 
         self.assertEqual(ringer.stop_count, 1)
+        self.assertFalse(session.is_running)
+        self.assertEqual(session.stop_count, 1)
+        self.assertEqual(selector.enter_count, 1)
+        self.assertEqual(selector.digits, [])
+
+        await controller.handle(HardwareEvent(HardwareEventType.DIAL, 2))
+
         self.assertEqual(selector.enter_count, 1)
         self.assertEqual(selector.digits, [2])
 

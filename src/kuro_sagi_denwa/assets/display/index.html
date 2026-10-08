@@ -9,7 +9,9 @@
     * { box-sizing:border-box; }
     body { margin:0; color:var(--ink); background:#17100b; font-family:"Yu Mincho","Hiragino Mincho ProN",serif; }
     .frame { position:relative; width:min(100vw,1080px); height:100vh; margin:auto; padding:3.2vh 4vw; display:flex; flex-direction:column; background:radial-gradient(circle at 30% 15%,#ead9b8,#c4a97d 72%,#9c7a52); border:clamp(10px,2vw,28px) solid #342014; box-shadow:inset 0 0 40px #3a2417; }
-    #settings { display:none; margin:2vh 0 0; padding:1.4vh 2vw; background:rgba(43,29,18,.88); color:#f2dfb8; border:2px solid var(--gold); border-radius:16px; font-size:clamp(18px,2.5vw,32px); line-height:1.65; }
+    #settings { display:none; flex:1; align-items:center; justify-content:center; padding:5vh 5vw; text-align:center; white-space:pre-wrap; background:rgba(43,29,18,.92); color:#f2dfb8; border:3px solid var(--gold); border-radius:16px; font-size:clamp(24px,3.4vw,48px); line-height:1.8; }
+    .frame.settings-mode #settings { display:flex; }
+    .frame.settings-mode #messages { display:none; }
     #messages { flex:1; overflow-y:auto; padding:2.5vh 0; scroll-behavior:smooth; }
     .welcome { text-align:center; margin-top:24vh; opacity:.65; font-size:clamp(24px,3vw,42px); line-height:1.8; }
     .message { display:flex; margin:0 0 2.2vh; animation:appear .2s ease-out; }
@@ -30,13 +32,15 @@
   </main>
   <script>
     const messages = document.querySelector('#messages');
+    const frame = document.querySelector('.frame');
     const settingsBox = document.querySelector('#settings');
     const disconnected = document.querySelector('#disconnected');
     const partials = new Map();
 
     function reset() {
       messages.innerHTML = '';
-      settingsBox.style.display = 'none'; settingsBox.textContent = ''; partials.clear();
+      frame.classList.remove('settings-mode');
+      settingsBox.textContent = ''; partials.clear();
     }
     function transcript(event) {
       const key = event.speaker;
@@ -65,9 +69,9 @@
       if (event.type === 'transcript') return transcript(event);
       if (event.type === 'settings') {
         if (event.active === false) {
-          settingsBox.style.display = 'none'; settingsBox.textContent = ''; return;
+          frame.classList.remove('settings-mode'); settingsBox.textContent = ''; return;
         }
-        settingsBox.style.display = 'block';
+        frame.classList.add('settings-mode');
         settingsBox.textContent = event.text;
       }
     }
