@@ -64,6 +64,7 @@ class GPTLiveSession:
         import websockets
 
         try:
+            logger.info("GPT-Liveセッションへ接続します")
             self._closed_event.clear()
             self.websocket = await websockets.connect(
                 self.URL,
@@ -77,10 +78,13 @@ class GPTLiveSession:
             )
             await self._wait_for_ack("session.input_audio.muted", "pre_ring_mute")
             self._prepared = True
+            logger.info("GPT-Liveセッションを開始しました（入力ミュート中）")
         except asyncio.CancelledError:
+            logger.info("GPT-Liveセッションの開始を中止します")
             await self._abort_start()
             raise
         except Exception:
+            logger.exception("GPT-Liveセッションを開始できませんでした")
             await self._abort_start()
             raise
 
@@ -109,6 +113,7 @@ class GPTLiveSession:
             # 挨拶後は通常の受信ループへ引き継ぐ。
             self._receiver_task = asyncio.create_task(self._receive_loop())
             self._receiver_task.add_done_callback(self._report_receiver_failure)
+            logger.info("GPT-Liveの通話を開始しました")
         except Exception:
             await self._abort_start()
             raise
@@ -356,6 +361,9 @@ class GPTLiveSession:
         await self.audio.stop()
 
     async def stop(self) -> None:
+        was_running = self.websocket is not None
+        if was_running:
+            logger.info("GPT-Liveセッションを終了します")
         if self._sender_task is not None:
             self._sender_task.cancel()
             await asyncio.gather(self._sender_task, return_exceptions=True)
@@ -382,3 +390,5 @@ class GPTLiveSession:
 
         self._prepared = False
         await self.audio.stop()
+        if was_running:
+            logger.info("GPT-Liveセッションを終了しました")

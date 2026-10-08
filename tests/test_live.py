@@ -1,8 +1,10 @@
 import asyncio
 import base64
 import json
+import sys
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from kuro_sagi_denwa.config import Settings
 from kuro_sagi_denwa.live import GPTLiveSession
@@ -115,6 +117,30 @@ class GPTLiveSessionTest(unittest.TestCase):
 
 
 class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
+    async def test_prepare_logs_session_start(self):
+        audio = DummyAudio()
+        session = GPTLiveSession(Settings(api_key="test-key"), audio)
+        websocket = FakeWebSocket(
+            [
+                {"type": "session.started"},
+                {
+                    "type": "session.input_audio.muted",
+                    "client_event_id": "pre_ring_mute",
+                },
+            ]
+        )
+
+        fake_websockets = SimpleNamespace(
+            connect=AsyncMock(return_value=websocket)
+        )
+        with patch.dict(sys.modules, {"websockets": fake_websockets}):
+            with self.assertLogs("kuro_sagi_denwa.live", level="INFO") as logs:
+                await session.prepare()
+
+        self.assertIn("GPT-Liveセッションへ接続します", logs.output[0])
+        self.assertIn("GPT-Liveセッションを開始しました", logs.output[-1])
+        self.assertTrue(session._prepared)
+
     async def test_waits_for_initial_greeting_before_conversation(self):
         audio = DummyAudio()
         session = GPTLiveSession(Settings(api_key="test-key"), audio)
@@ -160,13 +186,16 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
         session.websocket = websocket
         session._prepared = True
 
-        await session.stop()
+        with self.assertLogs("kuro_sagi_denwa.live", level="INFO") as logs:
+            await session.stop()
 
         self.assertEqual(websocket.sent, [{"type": "session.close"}])
         self.assertEqual(websocket.close_count, 1)
         self.assertEqual(audio.stop_count, 1)
         self.assertIsNone(session.websocket)
         self.assertFalse(session._prepared)
+        self.assertIn("GPT-Liveセッションを終了します", logs.output[0])
+        self.assertIn("GPT-Liveセッションを終了しました", logs.output[-1])
 
     async def test_instruction_acknowledgement_alone_does_not_finish_greeting(self):
         audio = DummyAudio()
