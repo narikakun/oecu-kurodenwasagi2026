@@ -14,6 +14,14 @@ class DummyAudio:
         self.played = []
         self.wait_count = 0
         self.clear_count = 0
+        self.start_count = 0
+        self.stop_count = 0
+
+    async def start(self):
+        self.start_count += 1
+
+    async def stop(self):
+        self.stop_count += 1
 
     async def play(self, data):
         self.played.append(data)
@@ -29,12 +37,16 @@ class FakeWebSocket:
     def __init__(self, received=None):
         self.sent = []
         self.received = list(received or [])
+        self.close_count = 0
 
     async def send(self, value):
         self.sent.append(json.loads(value))
 
     async def recv(self):
         return json.dumps(self.received.pop(0))
+
+    async def close(self):
+        self.close_count += 1
 
 
 class FakeDisplay:
@@ -123,6 +135,38 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(audio.played, [b"moshimoshi"])
         self.assertEqual(audio.wait_count, 1)
+
+    async def test_waits_for_matching_audio_control_acknowledgement(self):
+        session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio())
+        session.websocket = FakeWebSocket(
+            [
+                {
+                    "type": "session.input_audio.muted",
+                    "client_event_id": "different_event",
+                },
+                {
+                    "type": "session.input_audio.muted",
+                    "client_event_id": "pre_ring_mute",
+                },
+            ]
+        )
+
+        await session._wait_for_ack("session.input_audio.muted", "pre_ring_mute")
+
+    async def test_stop_closes_prepared_session_without_receiver_loop(self):
+        audio = DummyAudio()
+        session = GPTLiveSession(Settings(api_key="test-key"), audio)
+        websocket = FakeWebSocket([{"type": "session.closed"}])
+        session.websocket = websocket
+        session._prepared = True
+
+        await session.stop()
+
+        self.assertEqual(websocket.sent, [{"type": "session.close"}])
+        self.assertEqual(websocket.close_count, 1)
+        self.assertEqual(audio.stop_count, 1)
+        self.assertIsNone(session.websocket)
+        self.assertFalse(session._prepared)
 
     async def test_instruction_acknowledgement_alone_does_not_finish_greeting(self):
         audio = DummyAudio()
