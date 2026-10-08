@@ -68,12 +68,12 @@ class GPTLiveSession:
             await self._send_event(self._session_start_event())
             await self._wait_until_started()
 
-            # 挨拶指示を音声入力より先に送信する。ただしGPT-Liveのタイムラインを
-            # 進めるため、挨拶の処理中も入力ストリームは継続する。
+            # GPT-Liveのタイムラインを進めるため、入力音声の送信を開始してから
+            # 挨拶指示を送り、挨拶の処理中も入力ストリームを継続する。
             self.audio.clear_input_queue()
-            await self._send_event(self._greeting_event())
             self._sender_task = asyncio.create_task(self._send_audio_loop())
             self._sender_task.add_done_callback(self._report_sender_failure)
+            await self._send_event(self._greeting_event())
             await self._wait_until_greeting_accepted()
 
             # 挨拶後は通常の受信ループへ引き継ぐ。
@@ -226,9 +226,11 @@ class GPTLiveSession:
                 raise RuntimeError(f"GPT-Liveの開始に失敗しました: {message}")
 
     async def _wait_until_greeting_accepted(self) -> None:
-        """最初の挨拶指示が受理され、生成済み音声が再生されるまで待つ。"""
+        """挨拶指示の受理と、実際の最初の音声出力の両方を確認する。"""
         assert self.websocket is not None
-        while True:
+        instruction_accepted = False
+        audio_received = False
+        while not (instruction_accepted and audio_received):
             raw = await asyncio.wait_for(self.websocket.recv(), timeout=15)
             event = json.loads(raw)
             await self._handle_server_event(event)
@@ -236,8 +238,10 @@ class GPTLiveSession:
                 event.get("type") == "session.instructions.appended"
                 and event.get("client_event_id") == "initial_greeting"
             ):
-                await self.audio.wait_until_played()
-                return
+                instruction_accepted = True
+            elif event.get("type") == "session.output_audio.delta":
+                audio_received = True
+        await self.audio.wait_until_played()
 
     async def _send_audio_loop(self) -> None:
         assert self.websocket is not None
