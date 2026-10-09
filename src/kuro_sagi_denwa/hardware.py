@@ -8,7 +8,7 @@ from queue import Empty, SimpleQueue
 from dataclasses import dataclass
 from enum import Enum
 from time import monotonic
-from typing import Protocol
+from typing import Any, Protocol
 
 from .config import Settings
 from .dial import DialDecoder
@@ -51,7 +51,9 @@ class PhoneHardware:
             min_pulse_interval_seconds=settings.dial_min_pulse_interval_ms / 1000,
             digit_timeout_seconds=settings.digit_timeout_ms / 1000,
         )
-        self._dial_pulses: SimpleQueue[float] = SimpleQueue()
+        # (コールバックが動いた時刻, エッジが起きた時刻) を渡す。
+        self._dial_pulses: SimpleQueue[tuple[float, float | None]] = SimpleQueue()
+        self._edge_origin: Any = None
         self._owns_inputs = hook_input is None and dial_input is None
 
     def open(self) -> None:
@@ -73,7 +75,22 @@ class PhoneHardware:
 
     def _on_dial_pulse(self) -> None:
         """gpiozeroのコールバックスレッドからパルス時刻だけを渡す。"""
-        self._dial_pulses.put(monotonic())
+        self._dial_pulses.put((monotonic(), self._dial_edge_seconds()))
+
+    def _dial_edge_seconds(self) -> float | None:
+        """カーネルが記録したエッジ時刻を、最初のエッジからの秒数で返す。
+
+        コールバックはGILの取り合いなどで遅れてまとめて動くことがあり、
+        その時点の時刻ではパルス間隔（約50ms）が縮んだり伸びたりする。
+        gpiozeroのticksは基準点が実装依存のため、差分だけを使う。
+        """
+        ticks = getattr(self.dial_input, "_last_changed", None)
+        factory = getattr(self.dial_input, "pin_factory", None)
+        if ticks is None or factory is None:
+            return None
+        if self._edge_origin is None:
+            self._edge_origin = ticks
+        return factory.ticks_diff(ticks, self._edge_origin)
 
     def _hook_is_up(self) -> bool:
         assert self.hook_input is not None
@@ -113,10 +130,10 @@ class PhoneHardware:
 
             while True:
                 try:
-                    pulse_at = self._dial_pulses.get_nowait()
+                    pulse_at, edge_at = self._dial_pulses.get_nowait()
                 except Empty:
                     break
-                self.decoder.add_pulse(pulse_at)
+                self.decoder.add_pulse(pulse_at, edge_at)
 
             while (digit := self.decoder.read_digit(now)) is not None:
                 yield HardwareEvent(HardwareEventType.DIAL, digit)

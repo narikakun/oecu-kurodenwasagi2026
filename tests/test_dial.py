@@ -48,6 +48,21 @@ class DialDecoderTest(unittest.TestCase):
         self.assertEqual(decoder.read_digit(2.0), 2)
         self.assertIsNone(decoder.read_digit(2.0))
 
+    def test_edge_timestamps_override_delayed_callbacks(self):
+        # コールバックが遅れて2回分が8ms差で届いても、エッジが50ms間隔なら2パルス。
+        decoder = DialDecoder(min_pulse_interval_seconds=0.025)
+        decoder.add_pulse(1.200, edge_at=0.000)
+        decoder.add_pulse(1.208, edge_at=0.050)
+        self.assertEqual(decoder.read_digit(1.400), 2)
+
+    def test_edge_timestamps_keep_stretched_callbacks_in_one_digit(self):
+        # コールバック同士が150ms以上空いても、エッジが50ms間隔なら同じ桁。
+        decoder = DialDecoder(digit_timeout_seconds=0.15)
+        decoder.add_pulse(1.000, edge_at=0.000)
+        decoder.add_pulse(1.140, edge_at=0.050)
+        decoder.add_pulse(1.160, edge_at=0.100)
+        self.assertEqual(decoder.read_digit(1.400), 3)
+
     def test_invalid_pulse_count_is_logged(self):
         decoder = DialDecoder()
         for index in range(11):

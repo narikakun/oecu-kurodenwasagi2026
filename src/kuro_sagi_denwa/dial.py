@@ -21,12 +21,19 @@ class DialDecoder:
     digit_timeout_seconds: float = 0.150
     pulse_count: int = 0
     last_pulse_at: float | None = None
+    last_edge_at: float | None = None
     _ready: deque[int] = field(default_factory=deque)
 
-    def add_pulse(self, now: float) -> None:
-        """パルスを数える。前のパルスから桁間の時間が空いていれば前の桁を確定する。"""
+    def add_pulse(self, now: float, edge_at: float | None = None) -> None:
+        """パルスを数える。前のパルスから桁間の時間が空いていれば前の桁を確定する。
+
+        edge_at があれば、受け取った時刻ではなくエッジの時刻で間隔を測る。
+        """
         if self.last_pulse_at is not None:
-            interval = now - self.last_pulse_at
+            if edge_at is not None and self.last_edge_at is not None:
+                interval = edge_at - self.last_edge_at
+            else:
+                interval = now - self.last_pulse_at
             # 取り出しが遅れて複数桁のパルスがまとめて届いても、
             # 記録時刻の間隔で桁を分けて合算しないようにする。
             if interval >= self.digit_timeout_seconds:
@@ -42,6 +49,7 @@ class DialDecoder:
 
         self.pulse_count += 1
         self.last_pulse_at = now
+        self.last_edge_at = edge_at
 
     def read_digit(self, now: float) -> int | None:
         """確定済みの数字があれば1つ返す。"""
@@ -58,6 +66,7 @@ class DialDecoder:
         count = self.pulse_count
         self.pulse_count = 0
         self.last_pulse_at = None
+        self.last_edge_at = None
 
         if count == 10:
             self._ready.append(0)
@@ -70,4 +79,5 @@ class DialDecoder:
     def reset(self) -> None:
         self.pulse_count = 0
         self.last_pulse_at = None
+        self.last_edge_at = None
         self._ready.clear()
