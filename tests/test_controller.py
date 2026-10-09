@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 
 from kuro_sagi_denwa.controller import AppState, PhoneController
@@ -94,6 +95,7 @@ class PhoneControllerTest(unittest.IsolatedAsyncioTestCase):
         controller = PhoneController(session, display=display)
 
         await controller.handle(HardwareEvent(HardwareEventType.HOOK_UP))
+        await controller.wait_until_started()
         self.assertEqual(controller.state, AppState.CONVERSATION)
         self.assertEqual(session.start_count, 1)
 
@@ -108,7 +110,9 @@ class PhoneControllerTest(unittest.IsolatedAsyncioTestCase):
         controller = PhoneController(session)
 
         await controller.handle(HardwareEvent(HardwareEventType.HOOK_UP))
+        await controller.wait_until_started()
         await controller.handle(HardwareEvent(HardwareEventType.HOOK_UP))
+        await controller.wait_until_started()
 
         self.assertEqual(session.start_count, 1)
 
@@ -116,6 +120,7 @@ class PhoneControllerTest(unittest.IsolatedAsyncioTestCase):
         session = FakeSession()
         controller = PhoneController(session)
         await controller.handle(HardwareEvent(HardwareEventType.HOOK_UP))
+        await controller.wait_until_started()
         await controller.handle(HardwareEvent(HardwareEventType.DIAL, 7))
         self.assertEqual(controller.last_digit, 7)
         self.assertEqual(session.digits, [7])
@@ -143,6 +148,7 @@ class PhoneControllerTest(unittest.IsolatedAsyncioTestCase):
         await controller.handle(HardwareEvent(HardwareEventType.DIAL, 9))
 
         await controller.handle(HardwareEvent(HardwareEventType.HOOK_UP))
+        await controller.wait_until_started()
 
         self.assertEqual(ringer.start_count, 0)
         self.assertGreaterEqual(ringer.stop_count, 1)
@@ -192,9 +198,52 @@ class PhoneControllerTest(unittest.IsolatedAsyncioTestCase):
         controller = PhoneController(session, ringer, selector)
 
         await controller.handle(HardwareEvent(HardwareEventType.HOOK_UP))
+        await controller.wait_until_started()
 
         self.assertFalse(selector.active)
         self.assertEqual(selector.exit_count, 1)
+        self.assertEqual(session.start_count, 1)
+
+    async def test_hook_down_during_start_cancels_it_immediately(self):
+        class SlowSession(FakeSession):
+            def __init__(self):
+                super().__init__()
+                self.start_cancelled = False
+
+            async def start(self):
+                self.running = True
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    # 実装のGPTLiveSessionと同じく、中止時は接続を片付ける。
+                    self.running = False
+                    self.start_cancelled = True
+                    raise
+
+        session = SlowSession()
+        controller = PhoneController(session)
+
+        await controller.handle(HardwareEvent(HardwareEventType.HOOK_UP))
+        await asyncio.sleep(0)
+        self.assertEqual(controller.state, AppState.CONNECTING)
+
+        await asyncio.wait_for(
+            controller.handle(HardwareEvent(HardwareEventType.HOOK_DOWN)), timeout=1
+        )
+
+        self.assertTrue(session.start_cancelled)
+        self.assertEqual(controller.state, AppState.IDLE)
+
+    async def test_hook_up_again_after_cancelled_start_restarts(self):
+        session = FakeSession()
+        controller = PhoneController(session)
+
+        await controller.handle(HardwareEvent(HardwareEventType.HOOK_UP))
+        await controller.handle(HardwareEvent(HardwareEventType.HOOK_DOWN))
+        await controller.handle(HardwareEvent(HardwareEventType.HOOK_UP))
+        await controller.wait_until_started()
+
+        self.assertEqual(controller.state, AppState.CONVERSATION)
         self.assertEqual(session.start_count, 1)
 
 

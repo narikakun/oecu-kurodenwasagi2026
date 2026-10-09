@@ -203,6 +203,39 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("GPT-Liveセッションを終了します", logs.output[0])
         self.assertIn("GPT-Liveセッションを終了しました", logs.output[-1])
 
+    async def test_cancelled_start_closes_connection_and_audio(self):
+        class BlockingWebSocket(FakeWebSocket):
+            async def recv(self):
+                if not self.received:
+                    await asyncio.Event().wait()
+                return await super().recv()
+
+        audio = DummyAudio()
+        session = GPTLiveSession(Settings(api_key="test-key"), audio)
+        websocket = BlockingWebSocket(
+            [
+                {
+                    "type": "session.input_audio.unmuted",
+                    "client_event_id": "handset_up_unmute",
+                }
+            ]
+        )
+        session.websocket = websocket
+        session._prepared = True
+
+        start_task = asyncio.create_task(session.start())
+        for _ in range(10):
+            await asyncio.sleep(0)
+        start_task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await start_task
+
+        self.assertEqual(websocket.close_count, 1)
+        self.assertIsNone(session.websocket)
+        self.assertIsNone(session._sender_task)
+        self.assertFalse(session.is_running)
+        self.assertEqual(audio.stop_count, 1)
+
     async def test_commentary_acknowledgement_alone_does_not_finish_greeting(self):
         audio = DummyAudio()
         session = GPTLiveSession(Settings(api_key="test-key"), audio)

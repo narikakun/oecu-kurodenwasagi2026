@@ -112,7 +112,8 @@ class GPTLiveSession:
             self._receiver_task = asyncio.create_task(self._receive_loop())
             self._receiver_task.add_done_callback(self._report_receiver_failure)
             logger.info("GPT-Liveの通話を開始しました")
-        except Exception:
+        except (Exception, asyncio.CancelledError):
+            # 挨拶中に受話器を置かれた場合も、送信タスクや接続を残さない。
             await self._abort_start()
             raise
 
