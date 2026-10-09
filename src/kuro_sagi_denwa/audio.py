@@ -65,12 +65,10 @@ class BellRinger:
             nchannels=1,
             sample_rate=self.sample_rate,
         )
-        samples = array("h", sound.samples)
-        for index, sample in enumerate(samples):
-            samples[index] = max(
-                -32768, min(32767, int(sample * self.settings.bell_volume))
-            )
-        pcm = samples.tobytes()
+        # 1サンプルずつの処理は重いため、GPIO監視を止めないよう別スレッドで行う。
+        pcm = await asyncio.to_thread(
+            scale_pcm16, sound.samples, self.settings.bell_volume
+        )
         bytes_per_block = (
             self.sample_rate * self.settings.block_ms // 1000 * 2
         )
@@ -369,6 +367,14 @@ class AudioDeviceSelector:
             return f"{device!r} (取得失敗: {error})"
 
 
+def scale_pcm16(samples, volume: float) -> bytes:
+    """PCM16のサンプル列へ音量を掛け、範囲外を切り詰める。"""
+    scaled = array("h", samples)
+    for index, sample in enumerate(scaled):
+        scaled[index] = max(-32768, min(32767, int(sample * volume)))
+    return scaled.tobytes()
+
+
 def resample_pcm16_mono(pcm: bytes, source_rate: int, target_rate: int) -> bytes:
     """モノラルPCM16を線形補間で別のサンプルレートへ変換する。"""
     if source_rate == target_rate or not pcm:
@@ -508,11 +514,9 @@ class AudioDevice:
             nchannels=1,
             sample_rate=self.settings.sample_rate,
         )
-        samples = array("h", sound.samples)
-        for index, sample in enumerate(samples):
-            samples[index] = max(-32768, min(32767, int(sample * volume)))
+        pcm = await asyncio.to_thread(scale_pcm16, sound.samples, volume)
 
-        self._hold_task = asyncio.create_task(self._hold_music_loop(samples.tobytes()))
+        self._hold_task = asyncio.create_task(self._hold_music_loop(pcm))
         logger.info("担当切替の保留音を開始しました")
 
     async def _hold_music_loop(self, pcm: bytes) -> None:

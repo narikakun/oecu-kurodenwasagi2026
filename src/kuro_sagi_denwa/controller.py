@@ -71,6 +71,7 @@ class PhoneController:
         self.last_digit: int | None = None
         self._hook_up = False
         self._ring_delay_task: asyncio.Task[None] | None = None
+        self._start_task: asyncio.Task[None] | None = None
 
     async def handle(self, event) -> None:
         if event.type == HardwareEventType.HOOK_UP:
@@ -78,9 +79,10 @@ class PhoneController:
             if self.device_selector is not None:
                 self.device_selector.exit()
             await self._cancel_ring()
-            await self._start_conversation()
+            self._begin_conversation()
         elif event.type == HardwareEventType.HOOK_DOWN:
             self._hook_up = False
+            await self._cancel_start()
             await self._end_conversation()
             if self.display is not None:
                 self.display.reset()
@@ -148,8 +150,32 @@ class PhoneController:
         if self.ringer is not None:
             await self.ringer.stop()
 
+    def _begin_conversation(self) -> None:
+        """接続と挨拶を待つ間もフック操作を処理できるよう、開始処理を別タスクで進める。"""
+        if self._start_task is not None and not self._start_task.done():
+            return
+        self._start_task = asyncio.create_task(self._start_conversation())
+
+    async def _cancel_start(self) -> None:
+        if self._start_task is None:
+            return
+        if not self._start_task.done():
+            logger.info("会話の開始処理を中止します")
+            self._start_task.cancel()
+        await asyncio.gather(self._start_task, return_exceptions=True)
+        self._start_task = None
+
+    async def wait_until_started(self) -> None:
+        """進行中の会話開始処理が終わるまで待つ。"""
+        if self._start_task is not None:
+            await asyncio.gather(self._start_task, return_exceptions=True)
+
+    async def close(self) -> None:
+        await self._cancel_start()
+        await self._cancel_ring()
+
     async def _start_conversation(self) -> None:
-        if self.session.is_conversation_active or self.state == AppState.CONNECTING:
+        if self.session.is_conversation_active:
             return
         self.state = AppState.CONNECTING
         self._display_state("connecting", "接続中")

@@ -9,7 +9,7 @@ from .audio import AudioDevice, AudioDeviceSelector, BellRinger
 from .config import Settings, load_env_file
 from .controller import PhoneController
 from .display import DisplayServer
-from .hardware import MockPhoneHardware, PhoneHardware
+from .hardware import HardwareEvent, MockPhoneHardware, PhoneHardware
 from .live import GPTLiveSession
 
 
@@ -32,10 +32,31 @@ async def run() -> None:
     session = GPTLiveSession(settings, audio, display)
     controller = PhoneController(session, ringer, device_selector, display)
 
-    try:
+    # GPIOの監視は会話制御とは別タスクで回し続け、
+    # 接続や終了を待つ間もフックとダイヤルの変化を取りこぼさないようにする。
+    events: asyncio.Queue[HardwareEvent] = asyncio.Queue()
+
+    async def watch_hardware() -> None:
         async for event in hardware.events():
-            await controller.handle(event)
+            events.put_nowait(event)
+
+    watcher = asyncio.create_task(watch_hardware())
+    try:
+        while True:
+            get_event = asyncio.create_task(events.get())
+            done, _ = await asyncio.wait(
+                {get_event, watcher}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if get_event not in done:
+                get_event.cancel()
+                # GPIO監視が例外で止まった場合は、その例外でアプリを終了させる。
+                watcher.result()
+                return
+            await controller.handle(get_event.result())
     finally:
+        watcher.cancel()
+        await asyncio.gather(watcher, return_exceptions=True)
+        await controller.close()
         await ringer.stop()
         await session.stop()
         await display.stop()

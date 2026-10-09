@@ -48,7 +48,6 @@ class PhoneHardware:
         self.hook_input = hook_input
         self.dial_input = dial_input
         self.decoder = DialDecoder(
-            debounce_seconds=settings.dial_debounce_ms / 1000,
             digit_timeout_seconds=settings.digit_timeout_ms / 1000,
         )
         self._dial_pulses: SimpleQueue[float] = SimpleQueue()
@@ -118,8 +117,7 @@ class PhoneHardware:
                     break
                 self.decoder.add_pulse(pulse_at)
 
-            digit = self.decoder.read_digit(now)
-            if digit is not None:
+            while (digit := self.decoder.read_digit(now)) is not None:
                 yield HardwareEvent(HardwareEventType.DIAL, digit)
 
             await asyncio.sleep(0.005)
