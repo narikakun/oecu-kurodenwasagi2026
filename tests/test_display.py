@@ -34,6 +34,19 @@ class DisplayServerTest(unittest.TestCase):
         self.assertIn('.frame.settings-mode #messages { display:none; }', html)
         self.assertIn("frame.classList.add('settings-mode')", html)
 
+    def test_uses_line_seed_jp_font(self):
+        html = (
+            Path(__file__).parents[1]
+            / "src"
+            / "kuro_sagi_denwa"
+            / "assets"
+            / "display"
+            / "index.html"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("family=LINE+Seed+JP:wght@400;700", html)
+        self.assertIn('font-family:"LINE Seed JP"', html)
+
 
 if __name__ == "__main__":
     unittest.main()
