@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import math
+import threading
 from array import array
 from pathlib import Path
 from typing import Any
@@ -79,20 +80,32 @@ class BellRinger:
             dtype="int16",
             device=self.output_device,
         )
+        stop_event = threading.Event()
+
+        def play() -> None:
+            # ALSAのストリームは複数スレッドから同時に操作すると内部状態が壊れるため、
+            # 開始・書き込み・停止をすべてこのスレッドだけで行う。
+            try:
+                stream.start()
+                logger.info("ベルを鳴らします")
+                while not stop_event.is_set():
+                    for offset in range(0, len(pcm), bytes_per_block):
+                        if stop_event.is_set():
+                            break
+                        stream.write(pcm[offset : offset + bytes_per_block])
+            finally:
+                stream.abort()
+                stream.close()
+                logger.info("ベルを停止しました")
+
+        player = asyncio.ensure_future(asyncio.to_thread(play))
         try:
-            stream.start()
-            logger.info("ベルを鳴らします")
-            while True:
-                for offset in range(0, len(pcm), bytes_per_block):
-                    await asyncio.to_thread(
-                        stream.write, pcm[offset : offset + bytes_per_block]
-                    )
+            await asyncio.shield(player)
         except asyncio.CancelledError:
+            stop_event.set()
+            # 書き込み中のブロックが終わり、ストリームを閉じるまで待つ。
+            await asyncio.gather(player, return_exceptions=True)
             raise
-        finally:
-            await asyncio.to_thread(stream.stop)
-            await asyncio.to_thread(stream.close)
-            logger.info("ベルを停止しました")
 
 
 class AudioDeviceSelector:

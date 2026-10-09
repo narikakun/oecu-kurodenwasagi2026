@@ -13,9 +13,11 @@ logger = logging.getLogger(__name__)
 class DialDecoder:
     """パルス数を数え、一定時間の無入力後に一桁を確定する。
 
-    チャタリング除去はgpiozeroのbounce_timeに任せ、ここでは数えるだけにする。
+    短いチャタリングはgpiozeroのbounce_timeで除き、それを抜けた余分なパルスは
+    ダイヤルの周期より明らかに短い間隔かどうかで捨てる。
     """
 
+    min_pulse_interval_seconds: float = 0.025
     digit_timeout_seconds: float = 0.150
     pulse_count: int = 0
     last_pulse_at: float | None = None
@@ -29,6 +31,12 @@ class DialDecoder:
             # 記録時刻の間隔で桁を分けて合算しないようにする。
             if interval >= self.digit_timeout_seconds:
                 self._finish_digit()
+            elif interval < self.min_pulse_interval_seconds:
+                logger.debug(
+                    "ダイヤルパルス間隔が短いためチャタリングとして無視します: %.1f ms",
+                    interval * 1000,
+                )
+                return
             else:
                 logger.debug("ダイヤルパルス間隔: %.1f ms", interval * 1000)
 

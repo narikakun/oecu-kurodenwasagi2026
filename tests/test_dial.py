@@ -21,12 +21,20 @@ class DialDecoderTest(unittest.TestCase):
 
         self.assertEqual(decoder.read_digit(0.61), 0)
 
-    def test_close_pulses_are_all_counted(self):
-        # チャタリング除去はgpiozero側で行うため、届いたパルスはすべて数える。
+    def test_pulse_shorter_than_dial_period_is_ignored(self):
+        # 20パルス/秒の1パルス（約50ms）の途中に来た余分なパルスは数えない。
+        decoder = DialDecoder(min_pulse_interval_seconds=0.025)
+        decoder.add_pulse(1.000)
+        decoder.add_pulse(1.012)
+        decoder.add_pulse(1.050)
+        self.assertEqual(decoder.pulse_count, 2)
+
+    def test_single_pulse_with_chatter_reads_as_one(self):
         decoder = DialDecoder()
         decoder.add_pulse(1.000)
-        decoder.add_pulse(1.004)
-        self.assertEqual(decoder.pulse_count, 2)
+        decoder.add_pulse(1.010)
+        self.assertEqual(decoder.read_digit(1.200), 1)
+        self.assertIsNone(decoder.read_digit(1.200))
 
     def test_late_pulses_are_split_into_digits_by_timestamp(self):
         # 取り出しが遅れて2桁分のパルスがまとめて届いても合算しない。

@@ -83,6 +83,8 @@ class Settings:
     block_ms: int = 20
     hook_debounce_ms: int = 30
     dial_debounce_ms: int = 5
+    # 600-A2型は20パルス/秒（約50ms周期）なので、これより短い間隔はチャタリングとみなす。
+    dial_min_pulse_interval_ms: int = 25
     digit_timeout_ms: int = 150
     mock_gpio: bool = False
 
@@ -119,6 +121,9 @@ class Settings:
                 os.getenv("BELL_DEVICE_SAMPLE_RATE", "48000")
             ),
             bell_volume=float(os.getenv("BELL_VOLUME", "0.7")),
+            dial_min_pulse_interval_ms=int(
+                os.getenv("DIAL_MIN_PULSE_INTERVAL_MS", "25")
+            ),
             mock_gpio=_bool_env("MOCK_GPIO", False),
         )
 
