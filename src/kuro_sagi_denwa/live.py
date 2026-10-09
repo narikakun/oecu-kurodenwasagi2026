@@ -10,6 +10,7 @@ from typing import Any
 
 from .audio import AudioDevice
 from .config import Settings
+from .scenario import REFUND_FRAUD_SCENARIO
 
 transcript_logger = logging.getLogger("kuro_sagi_denwa.transcript")
 logger = logging.getLogger(__name__)
@@ -25,9 +26,8 @@ class GPTLiveSession:
         "短い相づちや感想も使い、毎回質問で返さないでください。"
         "長い説明が必要な場合は短く区切り、相手の反応を待ってください。"
         "相手が話し始めたら発話を止め、最後まで聞いてください。"
-        "通常の挨拶や簡単な質問にはすぐ答えてください。"
-        "詳しい確認が必要な質問はResponsesバックエンドへ委譲し、結果が届いたら必ず会話を"
-        "再開して短く回答してください。結果を待たないまま会話を終わらせないでください。"
+        "通常の挨拶や簡単な質問にはすぐ答えてください。\n\n"
+        + REFUND_FRAUD_SCENARIO
     )
     GREETING_COMMENTARY = "もしもし？"
     GREETING_TIMEOUT_SECONDS = 5

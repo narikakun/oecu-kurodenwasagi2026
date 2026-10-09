@@ -97,6 +97,10 @@ class GPTLiveSessionTest(unittest.TestCase):
         self.assertIn("毎回質問で返さない", event["session"]["instructions"])
         self.assertIn("相手が話し始めたら発話を止め", event["session"]["instructions"])
         self.assertIn("明るい声", event["session"]["instructions"])
+        self.assertIn("朝凪市役所", event["session"]["instructions"])
+        self.assertIn("22,560円", event["session"]["instructions"])
+        self.assertIn("お手続きを希望されますか", event["session"]["instructions"])
+        self.assertIn("具体的な送金操作へは進まない", event["session"]["instructions"])
 
     def test_web_search_can_be_disabled(self):
         settings = Settings(api_key="test-key", live_web_search=False)
