@@ -29,6 +29,7 @@ async def run() -> None:
     ringer = BellRinger(settings, audience)
     device_selector = AudioDeviceSelector(audio, ringer, display, audience)
     device_selector.restore()
+    device_selector.remember_current_names()
     device_selector.show_current()
     display.reset()
     session = GPTLiveSession(settings, audio, display)
