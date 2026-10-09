@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 
 from array import array
@@ -194,6 +195,57 @@ class AudioDeviceTest(unittest.TestCase):
         result = resample_pcm16_mono(source, 24_000, 48_000)
 
         self.assertEqual(array("h", result).tolist(), [0, 100, 200, 300, 400, 400])
+
+
+class BellRingerStreamTest(unittest.IsolatedAsyncioTestCase):
+    async def test_stream_is_stopped_on_the_same_thread_after_write(self):
+        import sys
+        import threading
+        import time
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        calls = []
+
+        class FakeStream:
+            def __init__(self, **kwargs):
+                self.writing = False
+
+            def _record(self, name):
+                calls.append((name, threading.get_ident(), self.writing))
+
+            def start(self):
+                self._record("start")
+
+            def write(self, data):
+                self.writing = True
+                time.sleep(0.01)
+                self.writing = False
+                self._record("write")
+
+            def abort(self):
+                self._record("abort")
+
+            def close(self):
+                self._record("close")
+
+        fake_sd = SimpleNamespace(RawOutputStream=FakeStream)
+        fake_miniaudio = SimpleNamespace(
+            SampleFormat=SimpleNamespace(SIGNED16=None),
+            decode_file=lambda *args, **kwargs: SimpleNamespace(samples=[0] * 48_000),
+        )
+        with patch.dict(sys.modules, {"sounddevice": fake_sd, "miniaudio": fake_miniaudio}):
+            ringer = BellRinger(Settings(api_key="test"))
+            await ringer.start()
+            await asyncio.sleep(0.05)
+            await ringer.stop()
+
+        names = [name for name, _, _ in calls]
+        self.assertEqual(names[0], "start")
+        self.assertEqual(names[-2:], ["abort", "close"])
+        # 書き込み中に停止せず、すべて同じスレッドで操作している。
+        self.assertEqual(len({thread for _, thread, _ in calls}), 1)
+        self.assertFalse(any(writing for _, _, writing in calls))
 
 
 if __name__ == "__main__":

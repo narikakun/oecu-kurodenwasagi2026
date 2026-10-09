@@ -48,6 +48,7 @@ class PhoneHardware:
         self.hook_input = hook_input
         self.dial_input = dial_input
         self.decoder = DialDecoder(
+            min_pulse_interval_seconds=settings.dial_min_pulse_interval_ms / 1000,
             digit_timeout_seconds=settings.digit_timeout_ms / 1000,
         )
         self._dial_pulses: SimpleQueue[float] = SimpleQueue()
