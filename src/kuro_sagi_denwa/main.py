@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 
 from .audio import AudioDevice, AudioDeviceSelector, BellRinger
 from .config import Settings, load_env_file
@@ -64,8 +65,14 @@ async def run() -> None:
 
 
 def main() -> None:
+    # .envのLOG_LEVELもログ設定に反映する。書式エラーはrun()で改めて報告する。
+    try:
+        load_env_file()
+    except ValueError:
+        pass
+    # ダイヤルのパルス間隔などを確認するときは LOG_LEVEL=DEBUG で起動する。
     logging.basicConfig(
-        level=logging.INFO,
+        level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     try:
