@@ -80,7 +80,7 @@ kuro-sagi-denwa
 
 シェルですでに設定されている環境変数は`.env`より優先されます。systemd運用時は`EnvironmentFile`で指定したファイルが使われます。
 
-GPT-Liveには、架空の朝凪市役所職員を名乗る還付金詐欺シナリオを設定しています。
+GPT-Liveには、守口市役所の職員を名乗る還付金詐欺シナリオを設定しています。
 22,560円の医療費還付、期限切れ、銀行・ATMでの特別手続きという順に会話し、参加者の
 自由な返答から安全行動・危険行動・判断保留へ自然に分岐します。選択肢やクイズは読み上げず、
 本名や口座情報を尋ねたり、具体的な送金操作を案内したりしません。詳細は
@@ -143,10 +143,21 @@ GPT-Liveとの通信は24,000 Hzのまま、入出力時に自動変換されま
 ```env
 AUDIO_OUTPUT_DEVICE=1
 AUDIO_DEVICE_SAMPLE_RATE=48000
+AUDIO_OUTPUT_VOLUME=1.0
 BELL_OUTPUT_DEVICE=2
 BELL_DEVICE_SAMPLE_RATE=48000
 BELL_VOLUME=0.7
+AUDIENCE_OUTPUT_DEVICE=3
+AUDIENCE_DEVICE_SAMPLE_RATE=48000
+AUDIENCE_VOLUME=0.7
 ```
+
+観客用出力には、受話器で再生するGPT-Live音声・保留音・話中音と、
+ベル音の両方が複製されます。`AUDIENCE_OUTPUT_DEVICE`が空欄の場合は無効です。
+
+音声設定画面では、ダイヤルの`0`〜`3`で入出力デバイスを選び、
+`4`〜`6`で受話器・ベル・観客用の音量を選びます。音量は続けて
+`0`（消音）〜`9`（最大）を回して設定します。
 
 ## テスト
 

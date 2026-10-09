@@ -75,10 +75,14 @@ class Settings:
     audio_input_device: str | int | None = None
     audio_output_device: str | int | None = None
     audio_device_sample_rate: int = 48_000
+    audio_output_volume: float = 1.0
     audio_settings_file: str = "~/.config/kuro-sagi-denwa/audio-settings.json"
     bell_output_device: str | int | None = None
     bell_device_sample_rate: int = 48_000
     bell_volume: float = 0.7
+    audience_output_device: str | int | None = None
+    audience_device_sample_rate: int = 48_000
+    audience_volume: float = 0.7
     sample_rate: int = 24_000
     block_ms: int = 20
     hook_debounce_ms: int = 30
@@ -114,6 +118,7 @@ class Settings:
             audio_device_sample_rate=int(
                 os.getenv("AUDIO_DEVICE_SAMPLE_RATE", "48000")
             ),
+            audio_output_volume=float(os.getenv("AUDIO_OUTPUT_VOLUME", "1.0")),
             audio_settings_file=os.getenv(
                 "AUDIO_SETTINGS_FILE",
                 "~/.config/kuro-sagi-denwa/audio-settings.json",
@@ -123,6 +128,11 @@ class Settings:
                 os.getenv("BELL_DEVICE_SAMPLE_RATE", "48000")
             ),
             bell_volume=float(os.getenv("BELL_VOLUME", "0.7")),
+            audience_output_device=_device_env("AUDIENCE_OUTPUT_DEVICE"),
+            audience_device_sample_rate=int(
+                os.getenv("AUDIENCE_DEVICE_SAMPLE_RATE", "48000")
+            ),
+            audience_volume=float(os.getenv("AUDIENCE_VOLUME", "0.7")),
             dial_min_pulse_interval_ms=int(
                 os.getenv("DIAL_MIN_PULSE_INTERVAL_MS", "25")
             ),
@@ -139,8 +149,14 @@ class Settings:
             self.sample_rate <= 0
             or self.audio_device_sample_rate <= 0
             or self.bell_device_sample_rate <= 0
+            or self.audience_device_sample_rate <= 0
             or self.block_ms <= 0
         ):
             raise ValueError("音声のサンプルレートとブロック時間は正の値が必要です")
-        if not 0 <= self.bell_volume <= 1:
-            raise ValueError("BELL_VOLUMEは0から1の間で指定してください")
+        for name, volume in (
+            ("AUDIO_OUTPUT_VOLUME", self.audio_output_volume),
+            ("BELL_VOLUME", self.bell_volume),
+            ("AUDIENCE_VOLUME", self.audience_volume),
+        ):
+            if not 0 <= volume <= 1:
+                raise ValueError(f"{name}は0から1の間で指定してください")

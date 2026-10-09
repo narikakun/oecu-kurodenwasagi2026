@@ -6,7 +6,7 @@ import asyncio
 import logging
 import os
 
-from .audio import AudioDevice, AudioDeviceSelector, BellRinger
+from .audio import AudienceOutput, AudioDevice, AudioDeviceSelector, BellRinger
 from .config import Settings, load_env_file
 from .controller import PhoneController
 from .display import DisplayServer
@@ -24,9 +24,10 @@ async def run() -> None:
     await display.start()
     if settings.display_kiosk:
         await display.start_kiosk(settings.display_kiosk_browser)
-    audio = AudioDevice(settings)
-    ringer = BellRinger(settings)
-    device_selector = AudioDeviceSelector(audio, ringer, display)
+    audience = AudienceOutput(settings)
+    audio = AudioDevice(settings, audience)
+    ringer = BellRinger(settings, audience)
+    device_selector = AudioDeviceSelector(audio, ringer, display, audience)
     device_selector.restore()
     device_selector.show_current()
     display.reset()
