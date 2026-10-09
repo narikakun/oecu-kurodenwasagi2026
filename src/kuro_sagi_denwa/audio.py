@@ -16,11 +16,79 @@ from .config import Settings
 logger = logging.getLogger(__name__)
 
 
+def _resolve_device(sd: Any, device: str | int | None, name: str | None, kind: str):
+    """保持した名前から現在のデバイス番号を引き直す。"""
+    if not name:
+        return device
+    channel_key = "max_input_channels" if kind == "input" else "max_output_channels"
+    try:
+        devices = list(sd.query_devices())
+    except Exception:
+        return device
+    matched = next(
+        (
+            index
+            for index, info in enumerate(devices)
+            if info.get("name") == name and info.get(channel_key, 0) > 0
+        ),
+        None,
+    )
+    if matched is not None:
+        return matched
+    # 環境変数にはPortAudioが解決する部分名（pipewireなど）も指定できる。
+    try:
+        sd.query_devices(name, kind=kind)
+        return name
+    except Exception:
+        return None
+
+
+def _supported_sample_rate(
+    sd: Any, device: str | int | None, kind: str, configured_rate: int
+) -> int:
+    """設定レートを確認し、非対応なら機器の既定レートを使う。"""
+    checker = getattr(sd, f"check_{kind}_settings", None)
+    if checker is None:
+        return configured_rate
+    try:
+        checker(
+            device=device,
+            channels=1,
+            dtype="int16",
+            samplerate=configured_rate,
+        )
+        return configured_rate
+    except Exception as configured_error:
+        try:
+            info = sd.query_devices(device, kind=kind)
+            default_rate = round(float(info["default_samplerate"]))
+            checker(
+                device=device,
+                channels=1,
+                dtype="int16",
+                samplerate=default_rate,
+            )
+        except Exception:
+            raise configured_error
+        logger.warning(
+            "%sデバイスは%d Hz非対応のため%d Hzを使います",
+            kind,
+            configured_rate,
+            default_rate,
+        )
+        return default_rate
+
+
 class AudienceOutput:
     """受話器音声とベル音を複製する観客用出力設定。"""
 
     def __init__(self, settings: Settings) -> None:
         self.output_device = settings.audience_output_device
+        self.device_name = (
+            settings.audience_output_device
+            if isinstance(settings.audience_output_device, str)
+            else None
+        )
         self.sample_rate = settings.audience_device_sample_rate
         self.volume = settings.audience_volume
 
@@ -39,6 +107,11 @@ class BellRinger:
             Path(__file__).parent / "assets" / "audio" / "Rotary_Phone-Ringtone01-1.mp3"
         )
         self.output_device = settings.bell_output_device
+        self.device_name = (
+            settings.bell_output_device
+            if isinstance(settings.bell_output_device, str)
+            else None
+        )
         self.sample_rate = settings.bell_device_sample_rate
         self.volume = settings.bell_volume
         self.audience = audience
@@ -75,78 +148,155 @@ class BellRinger:
         import miniaudio
         import sounddevice as sd
 
+        bell_device = _resolve_device(
+            sd, self.output_device, self.device_name, "output"
+        )
+        audience_device = None
+        if self.audience is not None:
+            audience_device = _resolve_device(
+                sd,
+                self.audience.output_device,
+                self.audience.device_name,
+                "output",
+            )
+
+        stream = None
+        if bell_device is not None or self.device_name is None:
+            try:
+                self.sample_rate = _supported_sample_rate(
+                    sd, bell_device, "output", self.sample_rate
+                )
+                stream = sd.RawOutputStream(
+                    samplerate=self.sample_rate,
+                    blocksize=self.sample_rate * self.settings.block_ms // 1000,
+                    channels=1,
+                    dtype="int16",
+                    device=bell_device,
+                )
+            except Exception as error:
+                logger.warning("ベル用出力を使用できません: %s", error)
+        audience_stream = None
+        if self.audience is not None and audience_device is not None:
+            try:
+                self.audience.sample_rate = _supported_sample_rate(
+                    sd, audience_device, "output", self.audience.sample_rate
+                )
+                audience_stream = sd.RawOutputStream(
+                    samplerate=self.audience.sample_rate,
+                    blocksize=self.audience.sample_rate
+                    * self.settings.block_ms
+                    // 1000,
+                    channels=1,
+                    dtype="int16",
+                    device=audience_device,
+                )
+            except Exception as error:
+                logger.warning("観客用出力を無効化します: %s", error)
+        if stream is None and audience_stream is None:
+            logger.error("利用できるベル出力がありません")
+            return
+
+        source_rate = (
+            self.sample_rate
+            if stream is not None
+            else self.audience.sample_rate
+        )
         sound = await asyncio.to_thread(
             miniaudio.decode_file,
             str(self.path),
             output_format=miniaudio.SampleFormat.SIGNED16,
             nchannels=1,
-            sample_rate=self.sample_rate,
+            sample_rate=source_rate,
         )
         # 1サンプルずつの処理は重いため、GPIO監視を止めないよう別スレッドで行う。
         pcm = await asyncio.to_thread(scale_pcm16, sound.samples, self.volume)
+        pcm = resample_pcm16_mono(pcm, source_rate, self.sample_rate)
         audience_pcm = None
-        if self.audience is not None and self.audience.output_device is not None:
+        if audience_stream is not None and self.audience is not None:
             audience_pcm = await asyncio.to_thread(
                 scale_pcm16, sound.samples, self.audience.volume
             )
             audience_pcm = resample_pcm16_mono(
-                audience_pcm, self.sample_rate, self.audience.sample_rate
+                audience_pcm, source_rate, self.audience.sample_rate
             )
-        bytes_per_block = (
-            self.sample_rate * self.settings.block_ms // 1000 * 2
-        )
+        source_bytes_per_block = source_rate * self.settings.block_ms // 1000 * 2
+        bytes_per_block = self.sample_rate * self.settings.block_ms // 1000 * 2
         audience_bytes_per_block = (
             self.audience.sample_rate * self.settings.block_ms // 1000 * 2
             if self.audience is not None
             else 0
         )
-        stream = sd.RawOutputStream(
-            samplerate=self.sample_rate,
-            blocksize=self.sample_rate * self.settings.block_ms // 1000,
-            channels=1,
-            dtype="int16",
-            device=self.output_device,
-        )
-        audience_stream = None
-        if self.audience is not None and self.audience.output_device is not None:
-            audience_stream = sd.RawOutputStream(
-                samplerate=self.audience.sample_rate,
-                blocksize=self.audience.sample_rate * self.settings.block_ms // 1000,
-                channels=1,
-                dtype="int16",
-                device=self.audience.output_device,
-            )
         stop_event = threading.Event()
 
         def play() -> None:
+            nonlocal stream, audience_stream
+
+            def close_stream(target) -> None:
+                if target is None:
+                    return
+                try:
+                    target.abort()
+                except Exception:
+                    pass
+                try:
+                    target.close()
+                except Exception:
+                    pass
+
             # ALSAのストリームは複数スレッドから同時に操作すると内部状態が壊れるため、
             # 開始・書き込み・停止をすべてこのスレッドだけで行う。
             try:
-                stream.start()
+                if stream is not None:
+                    try:
+                        stream.start()
+                    except Exception as error:
+                        logger.warning("ベル用出力を開始できません: %s", error)
+                        close_stream(stream)
+                        stream = None
                 if audience_stream is not None:
-                    audience_stream.start()
+                    try:
+                        audience_stream.start()
+                    except Exception as error:
+                        logger.warning("観客用出力を開始できません: %s", error)
+                        close_stream(audience_stream)
+                        audience_stream = None
+                if stream is None and audience_stream is None:
+                    return
                 logger.info("ベルを鳴らします")
                 while not stop_event.is_set():
                     for block_index, offset in enumerate(
-                        range(0, len(pcm), bytes_per_block)
+                        range(0, len(sound.samples) * 2, source_bytes_per_block)
                     ):
                         if stop_event.is_set():
                             break
-                        stream.write(pcm[offset : offset + bytes_per_block])
+                        if stream is not None:
+                            bell_offset = block_index * bytes_per_block
+                            try:
+                                stream.write(
+                                    pcm[bell_offset : bell_offset + bytes_per_block]
+                                )
+                            except Exception as error:
+                                logger.warning("ベル用出力が切断されました: %s", error)
+                                close_stream(stream)
+                                stream = None
                         if audience_stream is not None and audience_pcm is not None:
                             audience_offset = block_index * audience_bytes_per_block
-                            audience_stream.write(
-                                audience_pcm[
-                                    audience_offset : audience_offset
-                                    + audience_bytes_per_block
-                                ]
-                            )
+                            try:
+                                audience_stream.write(
+                                    audience_pcm[
+                                        audience_offset : audience_offset
+                                        + audience_bytes_per_block
+                                    ]
+                                )
+                            except Exception as error:
+                                logger.warning("観客用出力が切断されました: %s", error)
+                                close_stream(audience_stream)
+                                audience_stream = None
+                        if stream is None and audience_stream is None:
+                            return
             finally:
-                stream.abort()
-                stream.close()
-                if audience_stream is not None:
-                    audience_stream.abort()
-                    audience_stream.close()
+                close_stream(stream)
+                close_stream(audience_stream)
                 logger.info("ベルを停止しました")
 
         player = asyncio.ensure_future(asyncio.to_thread(play))
@@ -421,18 +571,52 @@ class AudioDeviceSelector:
         )
 
     def _apply_device(self, target: str, device: int | None, sample_rate: int) -> None:
+        device_name = None
+        if device is not None:
+            try:
+                device_name = str(self._devices()[device]["name"])
+            except (IndexError, KeyError, TypeError):
+                pass
         if target == "input":
             self.audio.input_device = device
+            self.audio.input_device_name = device_name
             self.audio.input_sample_rate = sample_rate
         elif target == "output":
             self.audio.output_device = device
+            self.audio.output_device_name = device_name
             self.audio.output_sample_rate = sample_rate
         elif target == "bell":
             self.ringer.output_device = device
+            self.ringer.device_name = device_name
             self.ringer.sample_rate = sample_rate
         else:
             self.audience.output_device = device
+            self.audience.device_name = device_name
             self.audience.sample_rate = sample_rate
+
+    def remember_current_names(self) -> None:
+        """起動時の番号設定を、抜き差しに強いデバイス名として保持する。"""
+        try:
+            devices = self._devices()
+        except Exception as error:
+            logger.warning("音声デバイス名を記憶できませんでした: %s", error)
+            return
+        for target, device in (
+            ("input", self.audio.input_device),
+            ("output", self.audio.output_device),
+            ("bell", self.ringer.output_device),
+            ("audience", self.audience.output_device),
+        ):
+            if isinstance(device, int) and 0 <= device < len(devices):
+                name = str(devices[device].get("name", "")) or None
+                if target == "input":
+                    self.audio.input_device_name = name
+                elif target == "output":
+                    self.audio.output_device_name = name
+                elif target == "bell":
+                    self.ringer.device_name = name
+                else:
+                    self.audience.device_name = name
 
     def _apply_default(self, target: str) -> None:
         import sounddevice as sd
@@ -574,6 +758,16 @@ class AudioDevice:
         self.settings = settings
         self.input_device = settings.audio_input_device
         self.output_device = settings.audio_output_device
+        self.input_device_name = (
+            settings.audio_input_device
+            if isinstance(settings.audio_input_device, str)
+            else None
+        )
+        self.output_device_name = (
+            settings.audio_output_device
+            if isinstance(settings.audio_output_device, str)
+            else None
+        )
         self.input_sample_rate = settings.audio_device_sample_rate
         self.output_sample_rate = settings.audio_device_sample_rate
         self.output_volume = settings.audio_output_volume
@@ -613,6 +807,26 @@ class AudioDevice:
         import sounddevice as sd
 
         self._loop = asyncio.get_running_loop()
+        input_device = _resolve_device(
+            sd, self.input_device, self.input_device_name, "input"
+        )
+        output_device = _resolve_device(
+            sd, self.output_device, self.output_device_name, "output"
+        )
+        if self.input_device_name and input_device is None:
+            raise RuntimeError(
+                f"受話器入力が接続されていません: {self.input_device_name}"
+            )
+        if self.output_device_name and output_device is None:
+            raise RuntimeError(
+                f"受話器出力が接続されていません: {self.output_device_name}"
+            )
+        self.input_sample_rate = _supported_sample_rate(
+            sd, input_device, "input", self.input_sample_rate
+        )
+        self.output_sample_rate = _supported_sample_rate(
+            sd, output_device, "output", self.output_sample_rate
+        )
         input_frames = self.input_sample_rate * self.settings.block_ms // 1000
         output_frames = self.output_sample_rate * self.settings.block_ms // 1000
 
@@ -621,7 +835,7 @@ class AudioDevice:
             blocksize=input_frames,
             channels=1,
             dtype="int16",
-            device=self.input_device,
+            device=input_device,
             callback=self._capture_callback,
         )
         self._output_stream = sd.RawOutputStream(
@@ -629,20 +843,47 @@ class AudioDevice:
             blocksize=output_frames,
             channels=1,
             dtype="int16",
-            device=self.output_device,
+            device=output_device,
         )
         if self.audience is not None and self.audience.output_device is not None:
-            self._audience_stream = sd.RawOutputStream(
-                samplerate=self.audience.sample_rate,
-                blocksize=self.audience.sample_rate * self.settings.block_ms // 1000,
-                channels=1,
-                dtype="int16",
-                device=self.audience.output_device,
+            audience_device = _resolve_device(
+                sd,
+                self.audience.output_device,
+                self.audience.device_name,
+                "output",
             )
+            if audience_device is None:
+                logger.warning(
+                    "観客用出力が接続されていないため無効化します: %s",
+                    self.audience.device_name,
+                )
+            else:
+                try:
+                    self.audience.sample_rate = _supported_sample_rate(
+                        sd,
+                        audience_device,
+                        "output",
+                        self.audience.sample_rate,
+                    )
+                    self._audience_stream = sd.RawOutputStream(
+                        samplerate=self.audience.sample_rate,
+                        blocksize=self.audience.sample_rate
+                        * self.settings.block_ms
+                        // 1000,
+                        channels=1,
+                        dtype="int16",
+                        device=audience_device,
+                    )
+                except Exception as error:
+                    logger.warning("観客用出力を無効化します: %s", error)
         self._input_stream.start()
         self._output_stream.start()
         if self._audience_stream is not None:
-            self._audience_stream.start()
+            try:
+                self._audience_stream.start()
+            except Exception as error:
+                logger.warning("観客用出力を開始できないため無効化します: %s", error)
+                await self._close_output_stream("_audience_stream")
         self._play_task = asyncio.create_task(self._play_loop())
         logger.info("USB受話器の録音・再生を開始しました")
 
@@ -652,13 +893,19 @@ class AudioDevice:
             if data is None:
                 self.output_queue.task_done()
                 return
-            if self._output_stream is not None:
-                device_data = resample_pcm16_mono(
-                    scale_pcm16(data, self.output_volume),
-                    self.settings.sample_rate,
-                    self.output_sample_rate,
-                )
-                writes = [asyncio.to_thread(self._output_stream.write, device_data)]
+            if self._output_stream is not None or self._audience_stream is not None:
+                writes = []
+                targets = []
+                if self._output_stream is not None:
+                    device_data = resample_pcm16_mono(
+                        scale_pcm16(data, self.output_volume),
+                        self.settings.sample_rate,
+                        self.output_sample_rate,
+                    )
+                    writes.append(
+                        asyncio.to_thread(self._output_stream.write, device_data)
+                    )
+                    targets.append("output")
                 if self._audience_stream is not None and self.audience is not None:
                     audience_data = resample_pcm16_mono(
                         scale_pcm16(data, self.audience.volume),
@@ -668,7 +915,17 @@ class AudioDevice:
                     writes.append(
                         asyncio.to_thread(self._audience_stream.write, audience_data)
                     )
-                await asyncio.gather(*writes)
+                    targets.append("audience")
+                results = await asyncio.gather(*writes, return_exceptions=True)
+                for target, result in zip(targets, results):
+                    if not isinstance(result, Exception):
+                        continue
+                    if target == "output":
+                        logger.warning("受話器出力が切断されました: %s", result)
+                        await self._close_output_stream("_output_stream")
+                    else:
+                        logger.warning("観客用出力が切断されました: %s", result)
+                        await self._close_output_stream("_audience_stream")
             self.output_queue.task_done()
 
     async def play(self, data: bytes) -> None:
@@ -681,6 +938,17 @@ class AudioDevice:
     async def wait_until_played(self) -> None:
         """再生待ちの音声がなくなるまで待つ。"""
         await self.output_queue.join()
+
+    async def _close_output_stream(self, attribute: str) -> None:
+        stream = getattr(self, attribute)
+        if stream is None:
+            return
+        for action in (stream.abort, stream.close):
+            try:
+                await asyncio.to_thread(action)
+            except Exception:
+                pass
+        setattr(self, attribute, None)
 
     def clear_input_queue(self) -> None:
         """担当切替前に録音された古い音声を、新しい担当へ送らないよう捨てる。"""
@@ -766,8 +1034,14 @@ class AudioDevice:
 
         for stream in (self._input_stream, self._output_stream, self._audience_stream):
             if stream is not None:
-                await asyncio.to_thread(stream.stop)
-                await asyncio.to_thread(stream.close)
+                try:
+                    await asyncio.to_thread(stream.stop)
+                except Exception:
+                    pass
+                try:
+                    await asyncio.to_thread(stream.close)
+                except Exception:
+                    pass
 
         self._input_stream = None
         self._output_stream = None

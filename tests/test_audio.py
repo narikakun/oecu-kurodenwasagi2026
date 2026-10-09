@@ -11,12 +11,45 @@ from kuro_sagi_denwa.audio import (
     AudioDevice,
     AudioDeviceSelector,
     BellRinger,
+    _resolve_device,
+    _supported_sample_rate,
     resample_pcm16_mono,
 )
 from kuro_sagi_denwa.config import Settings
 
 
 class AudioDeviceTest(unittest.TestCase):
+    def test_resolves_current_index_from_saved_device_name_after_hotplug(self):
+        class FakeSoundDevice:
+            @staticmethod
+            def query_devices(device=None, kind=None):
+                devices = [
+                    {"name": "new device", "max_output_channels": 1},
+                    {"name": "saved speaker", "max_output_channels": 1},
+                ]
+                return devices if device is None else devices[device]
+
+        self.assertEqual(
+            _resolve_device(FakeSoundDevice, 0, "saved speaker", "output"),
+            1,
+        )
+
+    def test_uses_device_default_rate_when_configured_rate_is_unsupported(self):
+        class FakeSoundDevice:
+            @staticmethod
+            def check_output_settings(**kwargs):
+                if kwargs["samplerate"] != 44_100:
+                    raise ValueError("Sample format not supported")
+
+            @staticmethod
+            def query_devices(device=None, kind=None):
+                return {"default_samplerate": 44_100}
+
+        self.assertEqual(
+            _supported_sample_rate(FakeSoundDevice, 2, "output", 48_000),
+            44_100,
+        )
+
     def test_bell_ringer_uses_rotary_phone_ringtone(self):
         ringer = BellRinger(Settings(api_key="test"))
 
@@ -338,6 +371,48 @@ class AudioDeviceAudienceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(array("h", handset_stream.writes[0]).tolist(), [500, -500])
         self.assertEqual(array("h", audience_stream.writes[0]).tolist(), [250, -250])
+
+    async def test_audience_continues_when_handset_output_is_unplugged(self):
+        class DisconnectedStream:
+            def write(self, data):
+                raise RuntimeError("device unavailable")
+
+            def abort(self):
+                pass
+
+            def close(self):
+                pass
+
+        class WorkingStream:
+            def __init__(self):
+                self.writes = []
+
+            def write(self, data):
+                self.writes.append(data)
+
+        settings = Settings(
+            api_key="test",
+            sample_rate=24_000,
+            audio_device_sample_rate=24_000,
+            audience_output_device=3,
+            audience_device_sample_rate=24_000,
+        )
+        audience = AudienceOutput(settings)
+        audio = AudioDevice(settings, audience)
+        audience_stream = WorkingStream()
+        audio._output_stream = DisconnectedStream()
+        audio._audience_stream = audience_stream
+        task = asyncio.create_task(audio._play_loop())
+
+        await audio.play(array("h", [1000]).tobytes())
+        await audio.output_queue.join()
+        await audio.play(array("h", [2000]).tobytes())
+        await audio.output_queue.join()
+        await audio.output_queue.put(None)
+        await task
+
+        self.assertIsNone(audio._output_stream)
+        self.assertEqual(len(audience_stream.writes), 2)
 
 
 if __name__ == "__main__":
