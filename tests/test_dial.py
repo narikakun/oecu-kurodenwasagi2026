@@ -63,6 +63,55 @@ class DialDecoderTest(unittest.TestCase):
         decoder.add_pulse(1.160, edge_at=0.100)
         self.assertEqual(decoder.read_digit(1.400), 3)
 
+    def test_first_pulse_of_each_operation_is_skipped(self):
+        decoder = DialDecoder(skip_first_pulse=True)
+        # 回し始めの余分なパルス → 戻りで本物の2パルス
+        decoder.add_pulse(1.000)
+        self.assertIsNone(decoder.read_digit(1.300))
+        decoder.add_pulse(1.500)
+        decoder.add_pulse(1.555)
+        self.assertEqual(decoder.read_digit(1.800), 2)
+
+        # 次の操作でも同じく最初の1パルスを捨てる。
+        decoder.add_pulse(3.000)
+        decoder.add_pulse(3.600)
+        self.assertEqual(decoder.read_digit(3.800), 1)
+
+    def test_skipped_pulse_merged_with_digit_is_removed(self):
+        # 素早く離して余分なパルスが本物のパルスと続けて届いても1つだけ捨てる。
+        decoder = DialDecoder(skip_first_pulse=True)
+        for index in range(3):
+            decoder.add_pulse(1.0 + index * 0.055)
+        self.assertEqual(decoder.read_digit(1.5), 2)
+
+    def test_chatter_right_after_skipped_pulse_is_ignored(self):
+        decoder = DialDecoder(skip_first_pulse=True)
+        decoder.add_pulse(1.000)
+        decoder.add_pulse(1.010)
+        decoder.add_pulse(1.500)
+        self.assertEqual(decoder.read_digit(1.700), 1)
+
+    def test_lone_skipped_pulse_times_out(self):
+        decoder = DialDecoder(skip_first_pulse=True, first_pulse_timeout_seconds=3.0)
+        decoder.add_pulse(1.000)
+        with self.assertLogs("kuro_sagi_denwa.dial", level="WARNING"):
+            self.assertIsNone(decoder.read_digit(4.100))
+        # 待機状態へ戻ったので、次のパルスは再び回し始めとして捨てる。
+        decoder.add_pulse(5.000)
+        decoder.add_pulse(5.500)
+        self.assertEqual(decoder.read_digit(5.700), 1)
+
+    def test_backlogged_operations_skip_each_first_pulse(self):
+        # 取り出しが遅れて2操作分がまとめて届いても、各操作の先頭を捨てる。
+        decoder = DialDecoder(skip_first_pulse=True)
+        decoder.add_pulse(1.000)
+        decoder.add_pulse(1.500)
+        decoder.add_pulse(1.555)
+        decoder.add_pulse(2.500)
+        decoder.add_pulse(3.000)
+        self.assertEqual(decoder.read_digit(3.300), 2)
+        self.assertEqual(decoder.read_digit(3.300), 1)
+
     def test_invalid_pulse_count_is_logged(self):
         decoder = DialDecoder()
         for index in range(11):

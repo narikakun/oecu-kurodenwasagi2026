@@ -56,10 +56,13 @@ class PhoneHardwareEventsTest(unittest.IsolatedAsyncioTestCase):
     async def test_backlogged_pulses_become_separate_digits(self):
         hardware = PhoneHardware(Settings(api_key="test"), FakeInput(0), FakeInput())
         start = monotonic() - 2
+        # 各操作の先頭に回し始めの余分なパルスが1回入る。
+        hardware._dial_pulses.put((start - 0.4, None))
         for index in range(3):
             hardware._dial_pulses.put((start + index * 0.05, None))
+        hardware._dial_pulses.put((start + 0.3, None))
         for index in range(2):
-            hardware._dial_pulses.put((start + 0.5 + index * 0.05, None))
+            hardware._dial_pulses.put((start + 0.7 + index * 0.05, None))
 
         events = hardware.events()
         first = await anext(events)

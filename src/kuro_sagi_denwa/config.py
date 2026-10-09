@@ -85,6 +85,8 @@ class Settings:
     dial_debounce_ms: int = 5
     # 600-A2型は20パルス/秒（約50ms周期）なので、これより短い間隔はチャタリングとみなす。
     dial_min_pulse_interval_ms: int = 25
+    # 実機のダイヤルは回し始めに余分なパルスを1回出すため、操作ごとの最初のパルスを捨てる。
+    dial_skip_first_pulse: bool = True
     digit_timeout_ms: int = 150
     mock_gpio: bool = False
 
@@ -124,6 +126,7 @@ class Settings:
             dial_min_pulse_interval_ms=int(
                 os.getenv("DIAL_MIN_PULSE_INTERVAL_MS", "25")
             ),
+            dial_skip_first_pulse=_bool_env("DIAL_SKIP_FIRST_PULSE", True),
             mock_gpio=_bool_env("MOCK_GPIO", False),
         )
 

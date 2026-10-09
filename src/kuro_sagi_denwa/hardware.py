@@ -50,10 +50,12 @@ class PhoneHardware:
         self.decoder = DialDecoder(
             min_pulse_interval_seconds=settings.dial_min_pulse_interval_ms / 1000,
             digit_timeout_seconds=settings.digit_timeout_ms / 1000,
+            skip_first_pulse=settings.dial_skip_first_pulse,
         )
         # (コールバックが動いた時刻, エッジが起きた時刻) を渡す。
         self._dial_pulses: SimpleQueue[tuple[float, float | None]] = SimpleQueue()
         self._edge_origin: Any = None
+        self._last_dial_edge_at: float | None = None
         self._owns_inputs = hook_input is None and dial_input is None
 
     def open(self) -> None:
@@ -72,10 +74,31 @@ class PhoneHardware:
             bounce_time=self.settings.dial_debounce_ms / 1000,
         )
         self.dial_input.when_pressed = self._on_dial_pulse
+        self.dial_input.when_released = self._on_dial_release
 
     def _on_dial_pulse(self) -> None:
         """gpiozeroのコールバックスレッドからパルス時刻だけを渡す。"""
-        self._dial_pulses.put((monotonic(), self._dial_edge_seconds()))
+        edge_at = self._dial_edge_seconds()
+        self._log_dial_edge("閉じました", "開いていた", edge_at)
+        self._dial_pulses.put((monotonic(), edge_at))
+
+    def _on_dial_release(self) -> None:
+        self._log_dial_edge("開きました", "閉じていた", self._dial_edge_seconds())
+
+    def _log_dial_edge(self, change: str, previous: str, edge_at: float | None) -> None:
+        """余分なパルスとダイヤル本来のパルスを見分けるため、接点の開閉時間を記録する。"""
+        if edge_at is None:
+            return
+        if self._last_dial_edge_at is None:
+            logger.debug("ダイヤル接点が%s", change)
+        else:
+            logger.debug(
+                "ダイヤル接点が%s（%s時間: %.1f ms）",
+                change,
+                previous,
+                (edge_at - self._last_dial_edge_at) * 1000,
+            )
+        self._last_dial_edge_at = edge_at
 
     def _dial_edge_seconds(self) -> float | None:
         """カーネルが記録したエッジ時刻を、最初のエッジからの秒数で返す。
