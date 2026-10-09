@@ -28,9 +28,13 @@ class LoadEnvFileTest(unittest.TestCase):
             "LIVE_BACKEND_MODEL": "gpt-6-luna",
             "LIVE_WEB_SEARCH": "false",
             "AUDIO_DEVICE_SAMPLE_RATE": "48000",
+            "AUDIO_OUTPUT_VOLUME": "0.8",
             "BELL_OUTPUT_DEVICE": "2",
             "BELL_DEVICE_SAMPLE_RATE": "48000",
             "BELL_VOLUME": "0.6",
+            "AUDIENCE_OUTPUT_DEVICE": "3",
+            "AUDIENCE_DEVICE_SAMPLE_RATE": "44100",
+            "AUDIENCE_VOLUME": "0.5",
             "DISPLAY_KIOSK": "false",
             "DISPLAY_KIOSK_BROWSER": "/usr/bin/chromium",
         }
@@ -41,9 +45,13 @@ class LoadEnvFileTest(unittest.TestCase):
         self.assertEqual(settings.live_backend_model, "gpt-6-luna")
         self.assertFalse(settings.live_web_search)
         self.assertEqual(settings.audio_device_sample_rate, 48_000)
+        self.assertEqual(settings.audio_output_volume, 0.8)
         self.assertEqual(settings.bell_output_device, 2)
         self.assertEqual(settings.bell_device_sample_rate, 48_000)
         self.assertEqual(settings.bell_volume, 0.6)
+        self.assertEqual(settings.audience_output_device, 3)
+        self.assertEqual(settings.audience_device_sample_rate, 44_100)
+        self.assertEqual(settings.audience_volume, 0.5)
         self.assertFalse(settings.display_kiosk)
         self.assertEqual(settings.display_kiosk_browser, "/usr/bin/chromium")
 
