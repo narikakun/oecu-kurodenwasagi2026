@@ -1,6 +1,33 @@
 """特殊詐欺体験電話で使用する会話シナリオ。"""
 
-REFUND_FRAUD_SCENARIO = """
+from __future__ import annotations
+
+import calendar
+from datetime import date, timedelta
+
+
+def _months_before(value: date, months: int) -> date:
+    """日付を指定した月数だけ戻す。月末は移動先の月末に丸める。"""
+    month_index = value.year * 12 + value.month - 1 - months
+    year, zero_based_month = divmod(month_index, 12)
+    month = zero_based_month + 1
+    day = min(value.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+def _japanese_date(value: date) -> str:
+    return f"{value.month}月{value.day}日"
+
+
+def build_refund_fraud_scenario(today: date | None = None) -> str:
+    """通話日を基準に、案内日と申請期限を入れたシナリオを作る。"""
+    current_date = today or date.today()
+    notice_date = _months_before(current_date, 3)
+    deadline = current_date - timedelta(days=1)
+    notice_date_text = _japanese_date(notice_date)
+    deadline_text = _japanese_date(deadline)
+
+    return f"""
 あなたは、架空の自治体「朝凪市役所」の保険年金課職員を名乗る電話の相手役です。
 これは還付金詐欺の電話として進行します。犯人役の間は、展示、体験、訓練、模擬、ゲーム、
 シナリオ、参加者という舞台裏の言葉を絶対に口にしないでください。
@@ -18,11 +45,10 @@ REFUND_FRAUD_SCENARIO = """
 - 自治体: 朝凪市役所
 - 部署: 保険年金課
 - 担当者名: 佐藤
-- 宛名: 高橋様
 - 名目: 過去3年間に払いすぎた医療費
 - 還付金額: 22,560円
-- 書類送付日: 6月13日
-- 申請期限: 9月13日
+- 書類送付日: {notice_date_text}
+- 申請期限: {deadline_text}
 
 個人情報と安全上の制約:
 - 相手や家族の本名、生年月日、住所、電話番号を尋ねない。
@@ -34,18 +60,19 @@ REFUND_FRAUD_SCENARIO = """
 導入:
 相手の最初の返事を受けたら、まず次の内容だけを伝える。
 「突然のお電話で失礼します。朝凪市役所、保険年金課の佐藤と申します。」
-返答を待ってから、「高橋様のお宅でよろしいでしょうか」と確認する。
+返答を待ってから、「医療費の還付についてご案内があり、お電話しました。
+お電話口の方がご本人様でよろしいでしょうか」と確認する。
 
-相手が高橋本人だと言った場合は、そのまま進める。本人ではない、名前が違う、分からないと
+相手が本人だと言った場合は、そのまま進める。本人ではない、分からないと
 言われた場合は、本当の名前を聞かず「ご家族の方でしょうか」など関係性だけを一度確認する。
 関係性が何であっても、「では、お電話口の方にご案内します」と自然に続ける。
 
 還付金の説明:
 1. 「過去にお支払いいただいた医療費の還付についてご連絡しました」と伝え、反応を待つ。
 2. 「過去3年間の医療費を見直したところ、22,560円の払い戻しがあります」と伝える。
-3. 6月13日に案内の封書を送ったが確認したか、一問だけで尋ねる。
+3. {notice_date_text}に案内の封書を送ったが確認したか、一問だけで尋ねる。
 4. 覚えていない、見ていない、分からない場合は責めず、「行き違いかもしれません」と受け止める。
-5. 申請期限は9月13日だったが、銀行で直接手続きすれば今回に限り受け取れると説明する。
+5. 申請期限は{deadline_text}だったが、銀行で直接手続きすれば今回に限り受け取れると説明する。
 6. 「お手続きを希望されますか」と一問だけで尋ねる。
 
 安全行動の扱い:

@@ -111,6 +111,20 @@ class GPTLiveSessionTest(unittest.TestCase):
         self.assertNotIn("tools", responses)
         self.assertNotIn("tool_choice", responses)
 
+    def test_scenario_dates_are_built_when_session_event_is_created(self):
+        session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio())
+
+        with patch(
+            "kuro_sagi_denwa.live.build_refund_fraud_scenario",
+            side_effect=["1回目の日付", "2回目の日付"],
+        ) as build_scenario:
+            first = session._session_start_event()
+            second = session._session_start_event()
+
+        self.assertIn("1回目の日付", first["session"]["instructions"])
+        self.assertIn("2回目の日付", second["session"]["instructions"])
+        self.assertEqual(build_scenario.call_count, 2)
+
     def test_greeting_is_only_moshimoshi(self):
         session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio())
 
