@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 from typing import Any
 
 from .audio import AudioDevice
@@ -14,6 +15,52 @@ from .scenario import build_refund_fraud_scenario
 
 transcript_logger = logging.getLogger("kuro_sagi_denwa.transcript")
 logger = logging.getLogger(__name__)
+
+_KANJI_DIGITS = {
+    "〇": 0, "零": 0, "一": 1, "二": 2, "三": 3,
+    "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9,
+}
+_SMALL_NUMBER_UNITS = {"十": 10, "百": 100, "千": 1_000}
+_LARGE_NUMBER_UNITS = {"万": 10_000, "億": 100_000_000, "兆": 1_000_000_000_000}
+_KANJI_NUMBER_RE = re.compile(r"[0-9〇零一二三四五六七八九十百千万億兆]+")
+_FULL_WIDTH_DIGIT_TABLE = str.maketrans("０１２３４５６７８９", "0123456789")
+
+
+def normalize_transcript_numbers(text: str) -> str:
+    """文字起こし中の全角数字と漢数字を半角数字へ統一する。"""
+    normalized = text.translate(_FULL_WIDTH_DIGIT_TABLE)
+
+    def replace(match: re.Match[str]) -> str:
+        token = match.group(0)
+        has_unit = any(
+            character in _SMALL_NUMBER_UNITS or character in _LARGE_NUMBER_UNITS
+            for character in token
+        )
+        if not has_unit:
+            return "".join(
+                character if character.isascii() else str(_KANJI_DIGITS[character])
+                for character in token
+            )
+
+        total = 0
+        section = 0
+        digits = ""
+        for character in token:
+            if character.isascii() or character in _KANJI_DIGITS:
+                digits += (
+                    character if character.isascii() else str(_KANJI_DIGITS[character])
+                )
+            elif character in _SMALL_NUMBER_UNITS:
+                section += int(digits or "1") * _SMALL_NUMBER_UNITS[character]
+                digits = ""
+            else:
+                section += int(digits or "0")
+                total += (section or 1) * _LARGE_NUMBER_UNITS[character]
+                section = 0
+                digits = ""
+        return str(total + section + int(digits or "0"))
+
+    return _KANJI_NUMBER_RE.sub(replace, normalized)
 
 
 class GPTLiveSession:
@@ -27,9 +74,20 @@ class GPTLiveSession:
         "長い説明が必要な場合は短く区切り、相手の反応を待ってください。"
         "相手が話し始めたら発話を止め、最後まで聞いてください。"
         "通常の挨拶や簡単な質問にはすぐ答えてください。"
+        "発音は、『守口市役所』を『もりぐちしやくしょ』、"
+        "『保険年金課』を『ほけんねんきんか』、『還付金』を『かんぷきん』、"
+        "『医療費』を『いりょうひ』、『ATM』を『エーティーエム』と読んでください。"
+        "『22,560円』は『にまんにせんごひゃくろくじゅうえん』と読んでください。"
     )
-    GREETING_COMMENTARY = "もしもし？"
-    GREETING_TIMEOUT_SECONDS = 5
+    GREETING_INSTRUCTION = (
+        "相手の発言を待たず、今すぐあなたから先に日本語で「もしもし？」とだけ言ってください。"
+        "ほかの言葉は加えず、言い終えたら相手の返事を待ってください。"
+    )
+    GREETING_RETRY_INSTRUCTION = (
+        "まだ最初の挨拶が聞こえていません。今すぐ「もしもし？」とだけ、もう一度言ってください。"
+        "言い終えたら相手の返事を待ってください。"
+    )
+    GREETING_TIMEOUT_SECONDS = 3
     TRANSCRIPT_IDLE_SECONDS = 1.0
     TRANSCRIPT_SENTENCE_SECONDS = 0.15
 
@@ -155,10 +213,14 @@ class GPTLiveSession:
 
     def _greeting_event(self, event_id: str = "initial_greeting") -> dict[str, Any]:
         return {
-            "type": "session.commentary.append",
+            "type": "session.instructions.append",
             "event_id": event_id,
             "delegation_id": None,
-            "content": self.GREETING_COMMENTARY,
+            "content": (
+                self.GREETING_RETRY_INSTRUCTION
+                if event_id == "initial_greeting_retry"
+                else self.GREETING_INSTRUCTION
+            ),
         }
 
     async def _send_event(self, event: dict[str, Any]) -> None:
@@ -178,7 +240,9 @@ class GPTLiveSession:
 
         current = self._transcript_buffers.get(label, "")
         if not current:
-            transcript_logger.info("文字起こし中（%s）: %s", label, delta)
+            transcript_logger.info(
+                "文字起こし中（%s）: %s", label, normalize_transcript_numbers(delta)
+            )
         self._transcript_buffers[label] = current + delta
         if self.display is not None:
             self.display.publish(
@@ -186,7 +250,7 @@ class GPTLiveSession:
                     "type": "transcript",
                     "speaker": "user" if label == "参加者" else "assistant",
                     "status": "partial",
-                    "text": self._transcript_buffers[label],
+                    "text": normalize_transcript_numbers(self._transcript_buffers[label]),
                 }
             )
 
@@ -210,14 +274,15 @@ class GPTLiveSession:
             handle.cancel()
         text = self._transcript_buffers.pop(label, "")
         if text:
-            transcript_logger.info("%s: %s", label, text)
+            normalized_text = normalize_transcript_numbers(text)
+            transcript_logger.info("%s: %s", label, normalized_text)
             if self.display is not None:
                 self.display.publish(
                     {
                         "type": "transcript",
                         "speaker": "user" if label == "参加者" else "assistant",
                         "status": "final",
-                        "text": text,
+                        "text": normalized_text,
                     }
                 )
 
@@ -273,13 +338,13 @@ class GPTLiveSession:
     async def _wait_until_greeting_accepted(self) -> None:
         """挨拶の受理、音声出力、文字起こしの「もしもし」を確認する。"""
         assert self.websocket is not None
-        commentary_accepted = False
+        instruction_accepted = False
         audio_received = False
         greeting_transcript = ""
         greeting_event_ids = {"initial_greeting"}
         retried = False
         while not (
-            commentary_accepted
+            instruction_accepted
             and audio_received
             and "もしもし" in greeting_transcript
         ):
@@ -303,10 +368,10 @@ class GPTLiveSession:
             event = json.loads(raw)
             await self._handle_server_event(event)
             if (
-                event.get("type") == "session.commentary.appended"
+                event.get("type") == "session.instructions.appended"
                 and event.get("client_event_id") in greeting_event_ids
             ):
-                commentary_accepted = True
+                instruction_accepted = True
             elif event.get("type") == "session.output_audio.delta":
                 audio_received = True
             elif event.get("type") == "session.output_transcript.delta":

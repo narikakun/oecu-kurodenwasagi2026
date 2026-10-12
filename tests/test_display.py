@@ -33,6 +33,11 @@ class DisplayServerTest(unittest.TestCase):
         self.assertIn('.frame.settings-mode #settings { display:flex; }', html)
         self.assertIn('.frame.settings-mode #messages { display:none; }', html)
         self.assertIn("frame.classList.add('settings-mode')", html)
+        self.assertIn("function renderSettings(event)", html)
+        self.assertIn("settings-subtitle", html)
+        self.assertIn("settings-footer", html)
+        self.assertIn(".frame.status-mode #status { display:flex; }", html)
+        self.assertIn("statusBox.textContent = '・・・'", html)
 
     def test_uses_line_seed_jp_font(self):
         html = (

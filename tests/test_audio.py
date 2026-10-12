@@ -120,20 +120,56 @@ class AudioDeviceTest(unittest.TestCase):
 
         selector.enter()
 
-        first_menu = display.events[-1]["text"]
-        self.assertIn("現在の受話器入力：0 (microphone)", first_menu)
-        self.assertIn("現在の受話器出力：1 (handset)", first_menu)
-        self.assertIn("48000 Hz", first_menu)
-        self.assertIn("0：受話器入力", first_menu)
-        self.assertIn("3：観客用出力", first_menu)
-        self.assertIn("6：観客用音量", first_menu)
+        first_menu = display.events[-1]
+        self.assertEqual(first_menu["title"], "音声設定")
+        menu_text = json.dumps(first_menu, ensure_ascii=False)
+        self.assertIn("受話器入力　0 (microphone)", menu_text)
+        self.assertIn("受話器出力　1 (handset)", menu_text)
+        self.assertIn("48000 Hz", menu_text)
+        self.assertIn("0 受話器入力", first_menu["choices"])
+        self.assertIn("3 観客用出力", first_menu["choices"])
+        self.assertIn("6 観客用音量", first_menu["choices"])
+        self.assertEqual(first_menu["footer"], "7：設定を閉じる")
 
         selector.handle_digit(1)
+        picker = display.events[-1]
+        self.assertEqual(picker["title"], "受話器出力の設定")
+        self.assertEqual(picker["subtitle"], "いま設定している項目：受話器出力")
+        self.assertIn("7：ひとつ前へ戻る", picker["footer"])
         selector.handle_digit(1)
 
-        returned_menu = display.events[-1]["text"]
-        self.assertIn("変更する項目をダイヤルしてください", returned_menu)
-        self.assertIn("現在の受話器出力：1 (handset)", returned_menu)
+        returned_menu = display.events[-1]
+        self.assertEqual(returned_menu["subtitle"], "設定する項目を選んでください")
+        self.assertIn("受話器出力　1 (handset)", json.dumps(returned_menu, ensure_ascii=False))
+
+    def test_device_selector_digit_seven_goes_back_then_closes_settings(self):
+        class FakeDisplay:
+            def __init__(self):
+                self.events = []
+
+            def publish(self, event):
+                self.events.append(event)
+
+        settings = Settings(api_key="test")
+        selector = AudioDeviceSelector(
+            AudioDevice(settings), BellRinger(settings), FakeDisplay()
+        )
+        selector._devices = lambda: []
+
+        selector.enter()
+        selector.handle_digit(4)
+        self.assertEqual(selector._pending_target, "output")
+
+        selector.handle_digit(7)
+        self.assertTrue(selector.active)
+        self.assertIsNone(selector._pending_target)
+        self.assertEqual(selector.display.events[-1]["title"], "音声設定")
+
+        selector.handle_digit(7)
+        self.assertFalse(selector.active)
+        self.assertEqual(
+            selector.display.events[-1], {"type": "settings", "active": False}
+        )
 
     def test_device_selector_saves_names_and_restores_available_devices(self):
         with tempfile.TemporaryDirectory() as directory:

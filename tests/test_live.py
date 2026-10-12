@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from kuro_sagi_denwa.config import Settings
-from kuro_sagi_denwa.live import GPTLiveSession
+from kuro_sagi_denwa.live import GPTLiveSession, normalize_transcript_numbers
 
 
 class DummyAudio:
@@ -63,6 +63,26 @@ class FakeDisplay:
 
 
 class GPTLiveSessionTest(unittest.TestCase):
+    def test_normalizes_transcript_numbers_to_half_width_digits(self):
+        self.assertEqual(
+            normalize_transcript_numbers("過去三年間で二万二千五百六十円です"),
+            "過去3年間で22560円です",
+        )
+        self.assertEqual(
+            normalize_transcript_numbers("番号は９１１０、回数は百二十三回です"),
+            "番号は9110、回数は123回です",
+        )
+        self.assertEqual(normalize_transcript_numbers("２万5千円"), "25000円")
+
+    def test_session_instructions_include_reference_pronunciations(self):
+        session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio())
+
+        instructions = session._session_start_event()["session"]["instructions"]
+
+        self.assertIn("『守口市役所』を『もりぐちしやくしょ』", instructions)
+        self.assertIn("『還付金』を『かんぷきん』", instructions)
+        self.assertIn("『22,560円』は", instructions)
+
     def test_session_start_event_is_minimal_free_conversation(self):
         settings = Settings(
             api_key="test-key",
@@ -130,12 +150,32 @@ class GPTLiveSessionTest(unittest.TestCase):
 
         event = session._greeting_event()
 
-        self.assertEqual(event["type"], "session.commentary.append")
+        self.assertEqual(event["type"], "session.instructions.append")
         self.assertIsNone(event["delegation_id"])
-        self.assertEqual(event["content"], "もしもし？")
+        self.assertIn("今すぐあなたから先に", event["content"])
+        self.assertIn("「もしもし？」とだけ", event["content"])
+
+        retry_event = session._greeting_event("initial_greeting_retry")
+        self.assertIn("まだ最初の挨拶が聞こえていません", retry_event["content"])
 
 
 class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
+    async def test_display_transcript_uses_half_width_digits_for_each_update(self):
+        display = FakeDisplay()
+        session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio(), display)
+
+        session._log_transcript(
+            {"type": "session.output_transcript.delta", "delta": "金額は二万"}
+        )
+        session._log_transcript(
+            {"type": "session.output_transcript.delta", "delta": "二千五百六十円です。"}
+        )
+        session._flush_all_transcripts()
+
+        self.assertEqual(display.events[0]["text"], "金額は20000")
+        self.assertEqual(display.events[1]["text"], "金額は22560円です。")
+        self.assertEqual(display.events[-1]["text"], "金額は22560円です。")
+
     async def test_prepare_logs_session_start(self):
         audio = DummyAudio()
         session = GPTLiveSession(Settings(api_key="test-key"), audio)
@@ -170,7 +210,7 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
                     "delta": base64.b64encode(b"moshimoshi").decode("ascii"),
                 },
                 {
-                    "type": "session.commentary.appended",
+                    "type": "session.instructions.appended",
                     "client_event_id": "initial_greeting",
                 },
                 {"type": "session.output_transcript.delta", "delta": "もしもし？"},
@@ -256,7 +296,7 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
         session.websocket = FakeWebSocket(
             [
                 {
-                    "type": "session.commentary.appended",
+                    "type": "session.instructions.appended",
                     "client_event_id": "initial_greeting",
                 },
                 {
@@ -278,12 +318,12 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
         session.websocket = FakeWebSocket(
             [
                 {
-                    "type": "session.commentary.appended",
+                    "type": "session.instructions.appended",
                     "client_event_id": "initial_greeting",
                 },
                 asyncio.TimeoutError(),
                 {
-                    "type": "session.commentary.appended",
+                    "type": "session.instructions.appended",
                     "client_event_id": "initial_greeting_retry",
                 },
                 {

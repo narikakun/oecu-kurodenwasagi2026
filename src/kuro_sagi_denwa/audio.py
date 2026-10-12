@@ -323,6 +323,7 @@ class AudioDeviceSelector:
         5: ("ベル音量", "bell"),
         6: ("観客用音量", "audience"),
     }
+    BACK_DIGIT = 7
 
     def __init__(
         self,
@@ -424,6 +425,17 @@ class AudioDeviceSelector:
             self.display.publish({"type": "settings", "active": False})
 
     def handle_digit(self, digit: int) -> None:
+        if digit == self.BACK_DIGIT:
+            if self._pending_target is not None:
+                logger.info("ひとつ前の音声設定メニューへ戻ります")
+                self._pending_target = None
+                self._pending_kind = None
+                self._show_menu()
+            else:
+                logger.info("音声デバイス設定モードを終了します")
+                self.exit()
+            return
+
         if self._pending_target is None:
             target = self.TARGETS.get(digit)
             if target is not None:
@@ -439,7 +451,7 @@ class AudioDeviceSelector:
                 logger.info("%sを選択します。0（消音）〜9（最大）を回してください", label)
                 self._show_volume_picker(label)
                 return
-            logger.warning("0から6のいずれかを回してください")
+            logger.warning("0から7のいずれかを回してください")
             return
 
         if self._pending_kind == "volume":
@@ -482,17 +494,32 @@ class AudioDeviceSelector:
             self._current_descriptions()
         )
         self._show_on_display(
-            "音声デバイス設定\n"
-            f"現在の受話器入力：{input_description} / {self.audio.input_sample_rate} Hz\n"
-            f"現在の受話器出力：{output_description} / {self.audio.output_sample_rate} Hz\n"
-            f"現在のベル出力：{bell_description} / {self.ringer.sample_rate} Hz\n\n"
-            f"現在の観客用出力：{audience_description} / {self.audience.sample_rate} Hz\n"
-            f"音量：受話器 {self._volume_percent(self.audio.output_volume)}% / "
-            f"ベル {self._volume_percent(self.ringer.volume)}% / "
-            f"観客 {self._volume_percent(self.audience.volume)}%\n\n"
-            "変更する項目をダイヤルしてください\n"
-            "0：受話器入力　1：受話器出力　2：ベル出力　3：観客用出力\n"
-            "4：受話器音量　5：ベル音量　6：観客用音量"
+            title="音声設定",
+            subtitle="設定する項目を選んでください",
+            sections=[
+                {
+                    "heading": "現在のデバイス",
+                    "items": [
+                        f"受話器入力　{input_description} / {self.audio.input_sample_rate} Hz",
+                        f"受話器出力　{output_description} / {self.audio.output_sample_rate} Hz",
+                        f"ベル出力　　{bell_description} / {self.ringer.sample_rate} Hz",
+                        f"観客用出力　{audience_description} / {self.audience.sample_rate} Hz",
+                    ],
+                },
+                {
+                    "heading": "現在の音量",
+                    "items": [
+                        f"受話器 {self._volume_percent(self.audio.output_volume)}%　"
+                        f"ベル {self._volume_percent(self.ringer.volume)}%　"
+                        f"観客 {self._volume_percent(self.audience.volume)}%"
+                    ],
+                },
+            ],
+            choices=[
+                "0 受話器入力", "1 受話器出力", "2 ベル出力", "3 観客用出力",
+                "4 受話器音量", "5 ベル音量", "6 観客用音量",
+            ],
+            footer="7：設定を閉じる",
         )
 
     def _current_descriptions(self) -> tuple[str, str, str, str]:
@@ -507,8 +534,10 @@ class AudioDeviceSelector:
 
     def _show_volume_picker(self, label: str) -> None:
         self._show_on_display(
-            f"{label}\n\n0：消音　1〜8：中間　9：最大\n"
-            "設定する音量をダイヤルしてください"
+            title=label,
+            subtitle=f"いま設定している項目：{label}",
+            sections=[{"heading": "音量を選ぶ", "items": ["0：消音　1〜6・8：中間　9：最大"]}],
+            footer="7：ひとつ前へ戻る",
         )
 
     @staticmethod
@@ -522,16 +551,44 @@ class AudioDeviceSelector:
         available = [
             f"{index}={device['name']}"
             for index, device in enumerate(self._devices())
-            if index <= 9 and device[channel_key] > 0
+            if index <= 9 and index != self.BACK_DIGIT and device[channel_key] > 0
         ]
         logger.info("選択可能なデバイス: %s", ", ".join(available) or "なし")
-        self._show_on_display("選択可能なデバイス\n" + ("\n".join(available) or "なし"))
+        label = self._target_label(target)
+        self._show_on_display(
+            title=f"{label}の設定",
+            subtitle=f"いま設定している項目：{label}",
+            sections=[{"heading": "選択できるデバイス", "items": available or ["使用できるデバイスがありません"]}],
+            footer="デバイス番号を回してください　｜　7：ひとつ前へ戻る",
+        )
 
-    def _show_on_display(self, text: str) -> None:
+    def _show_on_display(
+        self,
+        text: str | None = None,
+        *,
+        title: str | None = None,
+        subtitle: str | None = None,
+        sections: list[dict[str, Any]] | None = None,
+        choices: list[str] | None = None,
+        footer: str | None = None,
+    ) -> None:
         if self.display is not None:
-            self.display.publish({"type": "settings", "active": True, "text": text})
+            event: dict[str, Any] = {"type": "settings", "active": True}
+            if text is not None:
+                event["text"] = text
+            if title is not None:
+                event.update(
+                    title=title,
+                    subtitle=subtitle or "",
+                    sections=sections or [],
+                    choices=choices or [],
+                    footer=footer or "",
+                )
+            self.display.publish(event)
 
     def _supports(self, index: int, target: str) -> bool:
+        if index == self.BACK_DIGIT:
+            return False
         devices = self._devices()
         if not 0 <= index < len(devices):
             return False

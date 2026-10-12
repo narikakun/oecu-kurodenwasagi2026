@@ -96,6 +96,9 @@ class PhoneController:
                 and (self.device_selector.active or self._ringer_is_ringing())
             ):
                 if not self.device_selector.active:
+                    self._display_settings_loading()
+                    # WebSocket配信へ制御を戻し、時間のかかる終了処理より先に表示する。
+                    await asyncio.sleep(0)
                     await self._cancel_ring()
                     if self.session.is_running:
                         await self.session.stop()
@@ -201,3 +204,17 @@ class PhoneController:
     def _display_state(self, state: str, label: str) -> None:
         if self.display is not None:
             self.display.publish({"type": "state", "state": state, "label": label})
+
+    def _display_settings_loading(self) -> None:
+        if self.display is not None:
+            self.display.publish(
+                {
+                    "type": "settings",
+                    "active": True,
+                    "title": "音声設定",
+                    "subtitle": "読み込み中…",
+                    "sections": [],
+                    "choices": [],
+                    "footer": "しばらくお待ちください",
+                }
+            )
