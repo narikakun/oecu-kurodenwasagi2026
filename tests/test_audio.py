@@ -375,13 +375,165 @@ class BellRingerStreamTest(unittest.IsolatedAsyncioTestCase):
 
 
 class AudioDeviceAudienceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_slow_audience_output_does_not_block_handset_output(self):
+        import threading
+
+        audience_writing = threading.Event()
+        release_audience = threading.Event()
+
+        class HandsetStream:
+            def __init__(self):
+                self.writes = []
+
+            def start(self):
+                pass
+
+            def write(self, data):
+                self.writes.append(data)
+                return False
+
+            def stop(self):
+                pass
+
+            def close(self):
+                pass
+
+        class SlowAudienceStream(HandsetStream):
+            def write(self, data):
+                audience_writing.set()
+                release_audience.wait(timeout=1)
+                return super().write(data)
+
+        settings = Settings(
+            api_key="test",
+            sample_rate=24_000,
+            audio_device_sample_rate=24_000,
+            audience_output_device=3,
+            audience_device_sample_rate=24_000,
+        )
+        audio = AudioDevice(settings, AudienceOutput(settings))
+        handset_stream = HandsetStream()
+        audience_stream = SlowAudienceStream()
+        audio._output_stream = handset_stream
+        audio._audience_stream = audience_stream
+        task = asyncio.create_task(audio._play_loop())
+
+        try:
+            for value in range(3):
+                await audio.play(array("h", [value]).tobytes())
+            await audio.output_queue.join()
+            self.assertTrue(await asyncio.to_thread(audience_writing.wait, 0.2))
+            for _ in range(20):
+                if len(handset_stream.writes) == 3:
+                    break
+                await asyncio.sleep(0)
+
+            self.assertEqual(len(handset_stream.writes), 3)
+            self.assertEqual(len(audience_stream.writes), 0)
+        finally:
+            release_audience.set()
+            await audio.output_queue.put(None)
+            await task
+
+    async def test_each_output_stream_stays_on_its_own_fixed_thread(self):
+        import threading
+
+        class ThreadRecordingStream:
+            def __init__(self):
+                self.calls = []
+
+            def _record(self, action):
+                self.calls.append((action, threading.get_ident()))
+
+            def start(self):
+                self._record("start")
+
+            def write(self, data):
+                self._record("write")
+                return False
+
+            def stop(self):
+                self._record("stop")
+
+            def close(self):
+                self._record("close")
+
+        settings = Settings(
+            api_key="test",
+            sample_rate=24_000,
+            audio_device_sample_rate=24_000,
+            audience_output_device=3,
+            audience_device_sample_rate=24_000,
+        )
+        audio = AudioDevice(settings, AudienceOutput(settings))
+        handset_stream = ThreadRecordingStream()
+        audience_stream = ThreadRecordingStream()
+        audio._output_stream = handset_stream
+        audio._audience_stream = audience_stream
+        task = asyncio.create_task(audio._play_loop())
+
+        for value in range(4):
+            await audio.play(array("h", [value]).tobytes())
+        await audio.output_queue.join()
+        await audio.output_queue.put(None)
+        await task
+
+        for stream in (handset_stream, audience_stream):
+            self.assertEqual(
+                [action for action, _ in stream.calls],
+                ["start", "write", "write", "write", "write", "stop", "close"],
+            )
+            self.assertEqual(len({thread_id for _, thread_id in stream.calls}), 1)
+
+    async def test_audience_underflow_is_logged(self):
+        class UnderflowStream:
+            def start(self):
+                pass
+
+            def write(self, data):
+                return True
+
+            def stop(self):
+                pass
+
+            def close(self):
+                pass
+
+        settings = Settings(
+            api_key="test",
+            sample_rate=24_000,
+            audience_output_device=3,
+            audience_device_sample_rate=24_000,
+        )
+        audio = AudioDevice(settings, AudienceOutput(settings))
+        audio._audience_stream = UnderflowStream()
+        task = asyncio.create_task(audio._play_loop())
+
+        with self.assertLogs("kuro_sagi_denwa.audio", level="WARNING") as logs:
+            await audio.play(array("h", [1000]).tobytes())
+            await audio.output_queue.join()
+            await audio.output_queue.put(None)
+            await task
+
+        self.assertTrue(any("観客用出力で音声アンダーフロー" in line for line in logs.output))
+
     async def test_handset_audio_is_scaled_and_copied_to_audience(self):
         class FakeStream:
             def __init__(self):
                 self.writes = []
 
+            def start(self):
+                pass
+
             def write(self, data):
                 self.writes.append(data)
+                return False
+
+            def stop(self):
+                pass
+
+            def close(self):
+                pass
 
         settings = Settings(
             api_key="test",
@@ -410,6 +562,9 @@ class AudioDeviceAudienceTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_audience_continues_when_handset_output_is_unplugged(self):
         class DisconnectedStream:
+            def start(self):
+                pass
+
             def write(self, data):
                 raise RuntimeError("device unavailable")
 
@@ -423,8 +578,18 @@ class AudioDeviceAudienceTest(unittest.IsolatedAsyncioTestCase):
             def __init__(self):
                 self.writes = []
 
+            def start(self):
+                pass
+
             def write(self, data):
                 self.writes.append(data)
+                return False
+
+            def stop(self):
+                pass
+
+            def close(self):
+                pass
 
         settings = Settings(
             api_key="test",
