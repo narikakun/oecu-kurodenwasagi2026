@@ -63,6 +63,16 @@ def normalize_transcript_numbers(text: str) -> str:
     return _KANJI_NUMBER_RE.sub(replace, normalized)
 
 
+def normalize_transcript_for_display(text: str, *, assistant: bool) -> str:
+    """数字を整え、AIの発音用表記だけを字幕用の正式表記へ戻す。"""
+    normalized = normalize_transcript_numbers(text)
+    if assistant:
+        normalized = normalized.replace("もりぐち市役所", "守口市役所")
+        normalized = normalized.replace("もりぐちしやくしょ", "守口市役所")
+        normalized = normalized.replace("モリグチ市役所", "守口市役所")
+    return normalized
+
+
 class GPTLiveSession:
     """1接続だけを使い、受話器とGPT-Liveの音声をそのまま中継する。"""
 
@@ -242,9 +252,12 @@ class GPTLiveSession:
             return False
 
         current = self._transcript_buffers.get(label, "")
+        assistant = label == "AI"
         if not current:
             transcript_logger.info(
-                "文字起こし中（%s）: %s", label, normalize_transcript_numbers(delta)
+                "文字起こし中（%s）: %s",
+                label,
+                normalize_transcript_for_display(delta, assistant=assistant),
             )
         self._transcript_buffers[label] = current + delta
         if self.display is not None:
@@ -253,7 +266,9 @@ class GPTLiveSession:
                     "type": "transcript",
                     "speaker": "user" if label == "参加者" else "assistant",
                     "status": "partial",
-                    "text": normalize_transcript_numbers(self._transcript_buffers[label]),
+                    "text": normalize_transcript_for_display(
+                        self._transcript_buffers[label], assistant=assistant
+                    ),
                 }
             )
 
@@ -277,7 +292,9 @@ class GPTLiveSession:
             handle.cancel()
         text = self._transcript_buffers.pop(label, "")
         if text:
-            normalized_text = normalize_transcript_numbers(text)
+            normalized_text = normalize_transcript_for_display(
+                text, assistant=label == "AI"
+            )
             transcript_logger.info("%s: %s", label, normalized_text)
             if self.display is not None:
                 self.display.publish(

@@ -7,7 +7,11 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from kuro_sagi_denwa.config import Settings
-from kuro_sagi_denwa.live import GPTLiveSession, normalize_transcript_numbers
+from kuro_sagi_denwa.live import (
+    GPTLiveSession,
+    normalize_transcript_for_display,
+    normalize_transcript_numbers,
+)
 
 
 class DummyAudio:
@@ -83,6 +87,18 @@ class GPTLiveSessionTest(unittest.TestCase):
         self.assertIn("『まもりくち』という読み方は禁止", instructions)
         self.assertIn("『還付金』を『かんぷきん』", instructions)
         self.assertIn("『22,560円』は", instructions)
+
+    def test_uses_official_moriguchi_spelling_only_for_assistant_captions(self):
+        spoken = "もりぐち市役所、保険年金課です"
+
+        self.assertEqual(
+            normalize_transcript_for_display(spoken, assistant=True),
+            "守口市役所、保険年金課です",
+        )
+        self.assertEqual(
+            normalize_transcript_for_display(spoken, assistant=False),
+            spoken,
+        )
 
     def test_session_start_event_is_minimal_free_conversation(self):
         settings = Settings(
@@ -176,6 +192,21 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(display.events[0]["text"], "金額は20000")
         self.assertEqual(display.events[1]["text"], "金額は22560円です。")
         self.assertEqual(display.events[-1]["text"], "金額は22560円です。")
+
+    async def test_assistant_caption_restores_official_moriguchi_spelling(self):
+        display = FakeDisplay()
+        session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio(), display)
+
+        session._log_transcript(
+            {
+                "type": "session.output_transcript.delta",
+                "delta": "もりぐち市役所、保険年金課です。",
+            }
+        )
+        session._flush_all_transcripts()
+
+        self.assertEqual(display.events[0]["text"], "守口市役所、保険年金課です。")
+        self.assertEqual(display.events[-1]["text"], "守口市役所、保険年金課です。")
 
     async def test_prepare_logs_session_start(self):
         audio = DummyAudio()

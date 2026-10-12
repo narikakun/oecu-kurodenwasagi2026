@@ -18,7 +18,11 @@ class RefundFraudScenarioTest(unittest.TestCase):
         self.assertNotIn("朝凪市役所", self.scenario)
         self.assertIn("保険年金課", self.scenario)
         self.assertIn("佐藤", self.scenario)
-        self.assertIn("お電話口の方がご本人様でよろしいでしょうか", self.scenario)
+        self.assertIn(
+            "お電話口の方に、そのままご説明してもよろしいでしょうか",
+            self.scenario,
+        )
+        self.assertNotIn("ご本人様でよろしいでしょうか", self.scenario)
         self.assertNotIn("高橋", self.scenario)
         self.assertIn("22,560円", self.scenario)
 
