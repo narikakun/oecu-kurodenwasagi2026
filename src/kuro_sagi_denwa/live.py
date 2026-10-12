@@ -65,12 +65,18 @@ def normalize_transcript_numbers(text: str) -> str:
 
 def normalize_transcript_for_display(text: str, *, assistant: bool) -> str:
     """数字を整え、AIの発音用表記だけを字幕用の正式表記へ戻す。"""
-    normalized = normalize_transcript_numbers(text)
+    normalized = text
     if assistant:
+        normalized = normalized.replace(
+            "にまんにせんごひゃくろくじゅうえん", "22560円"
+        )
+        normalized = normalized.replace(
+            "二万二千五百六十円", "22560円"
+        )
         normalized = normalized.replace("もりぐち市役所", "守口市役所")
         normalized = normalized.replace("もりぐちしやくしょ", "守口市役所")
         normalized = normalized.replace("モリグチ市役所", "守口市役所")
-    return normalized
+    return normalize_transcript_numbers(normalized)
 
 
 class GPTLiveSession:

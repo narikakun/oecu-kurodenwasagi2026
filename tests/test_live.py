@@ -100,6 +100,18 @@ class GPTLiveSessionTest(unittest.TestCase):
             spoken,
         )
 
+    def test_restores_spoken_refund_amount_to_half_width_digits(self):
+        spoken = "にまんにせんごひゃくろくじゅうえんの払い戻しがあります。"
+
+        self.assertEqual(
+            normalize_transcript_for_display(spoken, assistant=True),
+            "22560円の払い戻しがあります。",
+        )
+        self.assertEqual(
+            normalize_transcript_for_display(spoken, assistant=False),
+            spoken,
+        )
+
     def test_session_start_event_is_minimal_free_conversation(self):
         settings = Settings(
             api_key="test-key",
