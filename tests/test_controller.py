@@ -98,6 +98,8 @@ class PhoneControllerTest(unittest.IsolatedAsyncioTestCase):
         await controller.wait_until_started()
         self.assertEqual(controller.state, AppState.CONVERSATION)
         self.assertEqual(session.start_count, 1)
+        self.assertEqual(display.events[0]["state"], "connecting")
+        self.assertEqual(display.events[-1]["state"], "conversation")
 
         await controller.handle(HardwareEvent(HardwareEventType.HOOK_DOWN))
         self.assertEqual(controller.state, AppState.IDLE)
@@ -172,13 +174,17 @@ class PhoneControllerTest(unittest.IsolatedAsyncioTestCase):
         session = FakeSession()
         ringer = FakeRinger()
         selector = FakeDeviceSelector()
-        controller = PhoneController(session, ringer, selector)
+        display = FakeDisplay()
+        controller = PhoneController(session, ringer, selector, display)
         await controller.handle(HardwareEvent(HardwareEventType.HOOK_DOWN))
         await session.prepare()
         await ringer.start()
 
         await controller.handle(HardwareEvent(HardwareEventType.DIAL, 2))
 
+        self.assertEqual(display.events[0]["title"], "音声設定")
+        self.assertEqual(display.events[0]["subtitle"], "読み込み中…")
+        self.assertEqual(display.events[0]["footer"], "しばらくお待ちください")
         self.assertEqual(ringer.stop_count, 1)
         self.assertFalse(session.is_running)
         self.assertEqual(session.stop_count, 1)

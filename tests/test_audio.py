@@ -120,20 +120,56 @@ class AudioDeviceTest(unittest.TestCase):
 
         selector.enter()
 
-        first_menu = display.events[-1]["text"]
-        self.assertIn("現在の受話器入力：0 (microphone)", first_menu)
-        self.assertIn("現在の受話器出力：1 (handset)", first_menu)
-        self.assertIn("48000 Hz", first_menu)
-        self.assertIn("0：受話器入力", first_menu)
-        self.assertIn("3：観客用出力", first_menu)
-        self.assertIn("6：観客用音量", first_menu)
+        first_menu = display.events[-1]
+        self.assertEqual(first_menu["title"], "音声設定")
+        menu_text = json.dumps(first_menu, ensure_ascii=False)
+        self.assertIn("受話器入力　0 (microphone)", menu_text)
+        self.assertIn("受話器出力　1 (handset)", menu_text)
+        self.assertIn("48000 Hz", menu_text)
+        self.assertIn("0 受話器入力", first_menu["choices"])
+        self.assertIn("3 観客用出力", first_menu["choices"])
+        self.assertIn("6 観客用音量", first_menu["choices"])
+        self.assertEqual(first_menu["footer"], "7：設定を閉じる")
 
         selector.handle_digit(1)
+        picker = display.events[-1]
+        self.assertEqual(picker["title"], "受話器出力の設定")
+        self.assertEqual(picker["subtitle"], "いま設定している項目：受話器出力")
+        self.assertIn("7：ひとつ前へ戻る", picker["footer"])
         selector.handle_digit(1)
 
-        returned_menu = display.events[-1]["text"]
-        self.assertIn("変更する項目をダイヤルしてください", returned_menu)
-        self.assertIn("現在の受話器出力：1 (handset)", returned_menu)
+        returned_menu = display.events[-1]
+        self.assertEqual(returned_menu["subtitle"], "設定する項目を選んでください")
+        self.assertIn("受話器出力　1 (handset)", json.dumps(returned_menu, ensure_ascii=False))
+
+    def test_device_selector_digit_seven_goes_back_then_closes_settings(self):
+        class FakeDisplay:
+            def __init__(self):
+                self.events = []
+
+            def publish(self, event):
+                self.events.append(event)
+
+        settings = Settings(api_key="test")
+        selector = AudioDeviceSelector(
+            AudioDevice(settings), BellRinger(settings), FakeDisplay()
+        )
+        selector._devices = lambda: []
+
+        selector.enter()
+        selector.handle_digit(4)
+        self.assertEqual(selector._pending_target, "output")
+
+        selector.handle_digit(7)
+        self.assertTrue(selector.active)
+        self.assertIsNone(selector._pending_target)
+        self.assertEqual(selector.display.events[-1]["title"], "音声設定")
+
+        selector.handle_digit(7)
+        self.assertFalse(selector.active)
+        self.assertEqual(
+            selector.display.events[-1], {"type": "settings", "active": False}
+        )
 
     def test_device_selector_saves_names_and_restores_available_devices(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -339,13 +375,165 @@ class BellRingerStreamTest(unittest.IsolatedAsyncioTestCase):
 
 
 class AudioDeviceAudienceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_slow_audience_output_does_not_block_handset_output(self):
+        import threading
+
+        audience_writing = threading.Event()
+        release_audience = threading.Event()
+
+        class HandsetStream:
+            def __init__(self):
+                self.writes = []
+
+            def start(self):
+                pass
+
+            def write(self, data):
+                self.writes.append(data)
+                return False
+
+            def stop(self):
+                pass
+
+            def close(self):
+                pass
+
+        class SlowAudienceStream(HandsetStream):
+            def write(self, data):
+                audience_writing.set()
+                release_audience.wait(timeout=1)
+                return super().write(data)
+
+        settings = Settings(
+            api_key="test",
+            sample_rate=24_000,
+            audio_device_sample_rate=24_000,
+            audience_output_device=3,
+            audience_device_sample_rate=24_000,
+        )
+        audio = AudioDevice(settings, AudienceOutput(settings))
+        handset_stream = HandsetStream()
+        audience_stream = SlowAudienceStream()
+        audio._output_stream = handset_stream
+        audio._audience_stream = audience_stream
+        task = asyncio.create_task(audio._play_loop())
+
+        try:
+            for value in range(3):
+                await audio.play(array("h", [value]).tobytes())
+            await audio.output_queue.join()
+            self.assertTrue(await asyncio.to_thread(audience_writing.wait, 0.2))
+            for _ in range(20):
+                if len(handset_stream.writes) == 3:
+                    break
+                await asyncio.sleep(0)
+
+            self.assertEqual(len(handset_stream.writes), 3)
+            self.assertEqual(len(audience_stream.writes), 0)
+        finally:
+            release_audience.set()
+            await audio.output_queue.put(None)
+            await task
+
+    async def test_each_output_stream_stays_on_its_own_fixed_thread(self):
+        import threading
+
+        class ThreadRecordingStream:
+            def __init__(self):
+                self.calls = []
+
+            def _record(self, action):
+                self.calls.append((action, threading.get_ident()))
+
+            def start(self):
+                self._record("start")
+
+            def write(self, data):
+                self._record("write")
+                return False
+
+            def stop(self):
+                self._record("stop")
+
+            def close(self):
+                self._record("close")
+
+        settings = Settings(
+            api_key="test",
+            sample_rate=24_000,
+            audio_device_sample_rate=24_000,
+            audience_output_device=3,
+            audience_device_sample_rate=24_000,
+        )
+        audio = AudioDevice(settings, AudienceOutput(settings))
+        handset_stream = ThreadRecordingStream()
+        audience_stream = ThreadRecordingStream()
+        audio._output_stream = handset_stream
+        audio._audience_stream = audience_stream
+        task = asyncio.create_task(audio._play_loop())
+
+        for value in range(4):
+            await audio.play(array("h", [value]).tobytes())
+        await audio.output_queue.join()
+        await audio.output_queue.put(None)
+        await task
+
+        for stream in (handset_stream, audience_stream):
+            self.assertEqual(
+                [action for action, _ in stream.calls],
+                ["start", "write", "write", "write", "write", "stop", "close"],
+            )
+            self.assertEqual(len({thread_id for _, thread_id in stream.calls}), 1)
+
+    async def test_audience_underflow_is_logged(self):
+        class UnderflowStream:
+            def start(self):
+                pass
+
+            def write(self, data):
+                return True
+
+            def stop(self):
+                pass
+
+            def close(self):
+                pass
+
+        settings = Settings(
+            api_key="test",
+            sample_rate=24_000,
+            audience_output_device=3,
+            audience_device_sample_rate=24_000,
+        )
+        audio = AudioDevice(settings, AudienceOutput(settings))
+        audio._audience_stream = UnderflowStream()
+        task = asyncio.create_task(audio._play_loop())
+
+        with self.assertLogs("kuro_sagi_denwa.audio", level="WARNING") as logs:
+            await audio.play(array("h", [1000]).tobytes())
+            await audio.output_queue.join()
+            await audio.output_queue.put(None)
+            await task
+
+        self.assertTrue(any("観客用出力で音声アンダーフロー" in line for line in logs.output))
+
     async def test_handset_audio_is_scaled_and_copied_to_audience(self):
         class FakeStream:
             def __init__(self):
                 self.writes = []
 
+            def start(self):
+                pass
+
             def write(self, data):
                 self.writes.append(data)
+                return False
+
+            def stop(self):
+                pass
+
+            def close(self):
+                pass
 
         settings = Settings(
             api_key="test",
@@ -374,6 +562,9 @@ class AudioDeviceAudienceTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_audience_continues_when_handset_output_is_unplugged(self):
         class DisconnectedStream:
+            def start(self):
+                pass
+
             def write(self, data):
                 raise RuntimeError("device unavailable")
 
@@ -387,8 +578,18 @@ class AudioDeviceAudienceTest(unittest.IsolatedAsyncioTestCase):
             def __init__(self):
                 self.writes = []
 
+            def start(self):
+                pass
+
             def write(self, data):
                 self.writes.append(data)
+                return False
+
+            def stop(self):
+                pass
+
+            def close(self):
+                pass
 
         settings = Settings(
             api_key="test",

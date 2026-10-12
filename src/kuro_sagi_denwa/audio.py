@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import math
+import queue
 import threading
 from array import array
 from pathlib import Path
@@ -14,6 +15,149 @@ from typing import Any
 from .config import Settings
 
 logger = logging.getLogger(__name__)
+
+
+class _OutputWorker:
+    """PortAudio出力を1本の固定スレッドで途切れにくく再生する。"""
+
+    def __init__(
+        self,
+        stream: Any,
+        label: str,
+        *,
+        prebuffer_bytes: int = 0,
+        on_closed=None,
+    ) -> None:
+        self.stream = stream
+        self.label = label
+        self.prebuffer_bytes = max(0, prebuffer_bytes)
+        self.on_closed = on_closed
+        self.queue: queue.Queue[bytes | None] = queue.Queue(maxsize=50)
+        self.thread = threading.Thread(
+            target=self._run,
+            name=f"audio-{label}",
+            daemon=True,
+        )
+        self.closed = False
+        self.accepting = True
+        self.underflow_count = 0
+        self.abort_requested = False
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def put(self, data: bytes) -> None:
+        if not self.accepting or self.closed:
+            return
+        try:
+            self.queue.put_nowait(data)
+        except queue.Full:
+            logger.warning("%s再生キューが満杯のため、一部の音声を破棄します", self.label)
+
+    def join(self) -> None:
+        self.queue.join()
+
+    def discard_pending(self) -> None:
+        self._discard_pending()
+
+    def stop(self, *, discard: bool) -> None:
+        self.accepting = False
+        if not self.thread.is_alive():
+            return
+        if discard:
+            self.abort_requested = True
+            self._discard_pending()
+        try:
+            self.queue.put(None, timeout=3)
+        except queue.Full:
+            logger.warning("%s再生キューへ停止指示を送れませんでした", self.label)
+            return
+        self.thread.join(timeout=3)
+        if self.thread.is_alive():
+            logger.warning("%s再生スレッドを3秒以内に停止できませんでした", self.label)
+
+    def _write(self, data: bytes) -> None:
+        underflowed = self.stream.write(data)
+        if underflowed:
+            self.underflow_count += 1
+            if self.underflow_count == 1 or self.underflow_count % 50 == 0:
+                logger.warning(
+                    "%sで音声アンダーフローを検出しました（累計%d回）",
+                    self.label,
+                    self.underflow_count,
+                )
+
+    def _discard_pending(self) -> None:
+        while True:
+            try:
+                item = self.queue.get_nowait()
+            except queue.Empty:
+                return
+            self.queue.task_done()
+            if item is None:
+                return
+
+    def _run(self) -> None:
+        started = False
+        try:
+            initial: list[bytes] = []
+            initial_bytes = 0
+            stopping = False
+            while not initial or initial_bytes < self.prebuffer_bytes:
+                try:
+                    item = self.queue.get(
+                        timeout=0.04 if initial else None
+                    )
+                except queue.Empty:
+                    break
+                if item is None:
+                    self.queue.task_done()
+                    stopping = True
+                    break
+                initial.append(item)
+                initial_bytes += len(item)
+
+            if initial:
+                self.stream.start()
+                started = True
+                for index, data in enumerate(initial):
+                    try:
+                        self._write(data)
+                    except Exception:
+                        for _ in initial[index + 1 :]:
+                            self.queue.task_done()
+                        raise
+                    finally:
+                        self.queue.task_done()
+
+            while not stopping:
+                item = self.queue.get()
+                if item is None:
+                    self.queue.task_done()
+                    break
+                try:
+                    self._write(item)
+                finally:
+                    self.queue.task_done()
+        except Exception as error:
+            self.abort_requested = True
+            logger.warning("%sが切断されました: %s", self.label, error)
+            self._discard_pending()
+        finally:
+            action_name = "abort" if self.abort_requested or not started else "stop"
+            action = getattr(self.stream, action_name, None)
+            if action is not None:
+                try:
+                    action()
+                except Exception:
+                    pass
+            try:
+                self.stream.close()
+            except Exception:
+                pass
+            self.closed = True
+            if self.on_closed is not None:
+                self.on_closed()
 
 
 def _resolve_device(sd: Any, device: str | int | None, name: str | None, kind: str):
@@ -323,6 +467,7 @@ class AudioDeviceSelector:
         5: ("ベル音量", "bell"),
         6: ("観客用音量", "audience"),
     }
+    BACK_DIGIT = 7
 
     def __init__(
         self,
@@ -424,6 +569,17 @@ class AudioDeviceSelector:
             self.display.publish({"type": "settings", "active": False})
 
     def handle_digit(self, digit: int) -> None:
+        if digit == self.BACK_DIGIT:
+            if self._pending_target is not None:
+                logger.info("ひとつ前の音声設定メニューへ戻ります")
+                self._pending_target = None
+                self._pending_kind = None
+                self._show_menu()
+            else:
+                logger.info("音声デバイス設定モードを終了します")
+                self.exit()
+            return
+
         if self._pending_target is None:
             target = self.TARGETS.get(digit)
             if target is not None:
@@ -439,7 +595,7 @@ class AudioDeviceSelector:
                 logger.info("%sを選択します。0（消音）〜9（最大）を回してください", label)
                 self._show_volume_picker(label)
                 return
-            logger.warning("0から6のいずれかを回してください")
+            logger.warning("0から7のいずれかを回してください")
             return
 
         if self._pending_kind == "volume":
@@ -482,17 +638,32 @@ class AudioDeviceSelector:
             self._current_descriptions()
         )
         self._show_on_display(
-            "音声デバイス設定\n"
-            f"現在の受話器入力：{input_description} / {self.audio.input_sample_rate} Hz\n"
-            f"現在の受話器出力：{output_description} / {self.audio.output_sample_rate} Hz\n"
-            f"現在のベル出力：{bell_description} / {self.ringer.sample_rate} Hz\n\n"
-            f"現在の観客用出力：{audience_description} / {self.audience.sample_rate} Hz\n"
-            f"音量：受話器 {self._volume_percent(self.audio.output_volume)}% / "
-            f"ベル {self._volume_percent(self.ringer.volume)}% / "
-            f"観客 {self._volume_percent(self.audience.volume)}%\n\n"
-            "変更する項目をダイヤルしてください\n"
-            "0：受話器入力　1：受話器出力　2：ベル出力　3：観客用出力\n"
-            "4：受話器音量　5：ベル音量　6：観客用音量"
+            title="音声設定",
+            subtitle="設定する項目を選んでください",
+            sections=[
+                {
+                    "heading": "現在のデバイス",
+                    "items": [
+                        f"受話器入力　{input_description} / {self.audio.input_sample_rate} Hz",
+                        f"受話器出力　{output_description} / {self.audio.output_sample_rate} Hz",
+                        f"ベル出力　　{bell_description} / {self.ringer.sample_rate} Hz",
+                        f"観客用出力　{audience_description} / {self.audience.sample_rate} Hz",
+                    ],
+                },
+                {
+                    "heading": "現在の音量",
+                    "items": [
+                        f"受話器 {self._volume_percent(self.audio.output_volume)}%　"
+                        f"ベル {self._volume_percent(self.ringer.volume)}%　"
+                        f"観客 {self._volume_percent(self.audience.volume)}%"
+                    ],
+                },
+            ],
+            choices=[
+                "0 受話器入力", "1 受話器出力", "2 ベル出力", "3 観客用出力",
+                "4 受話器音量", "5 ベル音量", "6 観客用音量",
+            ],
+            footer="7：設定を閉じる",
         )
 
     def _current_descriptions(self) -> tuple[str, str, str, str]:
@@ -507,8 +678,10 @@ class AudioDeviceSelector:
 
     def _show_volume_picker(self, label: str) -> None:
         self._show_on_display(
-            f"{label}\n\n0：消音　1〜8：中間　9：最大\n"
-            "設定する音量をダイヤルしてください"
+            title=label,
+            subtitle=f"いま設定している項目：{label}",
+            sections=[{"heading": "音量を選ぶ", "items": ["0：消音　1〜6・8：中間　9：最大"]}],
+            footer="7：ひとつ前へ戻る",
         )
 
     @staticmethod
@@ -522,16 +695,44 @@ class AudioDeviceSelector:
         available = [
             f"{index}={device['name']}"
             for index, device in enumerate(self._devices())
-            if index <= 9 and device[channel_key] > 0
+            if index <= 9 and index != self.BACK_DIGIT and device[channel_key] > 0
         ]
         logger.info("選択可能なデバイス: %s", ", ".join(available) or "なし")
-        self._show_on_display("選択可能なデバイス\n" + ("\n".join(available) or "なし"))
+        label = self._target_label(target)
+        self._show_on_display(
+            title=f"{label}の設定",
+            subtitle=f"いま設定している項目：{label}",
+            sections=[{"heading": "選択できるデバイス", "items": available or ["使用できるデバイスがありません"]}],
+            footer="デバイス番号を回してください　｜　7：ひとつ前へ戻る",
+        )
 
-    def _show_on_display(self, text: str) -> None:
+    def _show_on_display(
+        self,
+        text: str | None = None,
+        *,
+        title: str | None = None,
+        subtitle: str | None = None,
+        sections: list[dict[str, Any]] | None = None,
+        choices: list[str] | None = None,
+        footer: str | None = None,
+    ) -> None:
         if self.display is not None:
-            self.display.publish({"type": "settings", "active": True, "text": text})
+            event: dict[str, Any] = {"type": "settings", "active": True}
+            if text is not None:
+                event["text"] = text
+            if title is not None:
+                event.update(
+                    title=title,
+                    subtitle=subtitle or "",
+                    sections=sections or [],
+                    choices=choices or [],
+                    footer=footer or "",
+                )
+            self.display.publish(event)
 
     def _supports(self, index: int, target: str) -> bool:
+        if index == self.BACK_DIGIT:
+            return False
         devices = self._devices()
         if not 0 <= index < len(devices):
             return False
@@ -777,6 +978,8 @@ class AudioDevice:
         self._input_stream: Any = None
         self._output_stream: Any = None
         self._audience_stream: Any = None
+        self._output_worker: _OutputWorker | None = None
+        self._audience_worker: _OutputWorker | None = None
         self._play_task: asyncio.Task[None] | None = None
         self._hold_task: asyncio.Task[None] | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -877,55 +1080,50 @@ class AudioDevice:
                 except Exception as error:
                     logger.warning("観客用出力を無効化します: %s", error)
         self._input_stream.start()
-        self._output_stream.start()
-        if self._audience_stream is not None:
-            try:
-                self._audience_stream.start()
-            except Exception as error:
-                logger.warning("観客用出力を開始できないため無効化します: %s", error)
-                await self._close_output_stream("_audience_stream")
+        self._ensure_output_workers()
         self._play_task = asyncio.create_task(self._play_loop())
         logger.info("USB受話器の録音・再生を開始しました")
 
+    def _ensure_output_workers(self) -> None:
+        if self._output_stream is not None and self._output_worker is None:
+            self._output_worker = _OutputWorker(
+                self._output_stream,
+                "受話器出力",
+                on_closed=lambda: setattr(self, "_output_stream", None),
+            )
+            self._output_worker.start()
+        if self._audience_stream is not None and self._audience_worker is None:
+            # 約60 ms蓄えてから開始し、USB出力の瞬間的な揺れを吸収する。
+            self._audience_worker = _OutputWorker(
+                self._audience_stream,
+                "観客用出力",
+                prebuffer_bytes=self.audience.sample_rate * 60 // 1_000 * 2,
+                on_closed=lambda: setattr(self, "_audience_stream", None),
+            )
+            self._audience_worker.start()
+
     async def _play_loop(self) -> None:
+        self._ensure_output_workers()
         while True:
             data = await self.output_queue.get()
             if data is None:
                 self.output_queue.task_done()
+                await self._stop_output_workers(discard=False)
                 return
-            if self._output_stream is not None or self._audience_stream is not None:
-                writes = []
-                targets = []
-                if self._output_stream is not None:
-                    device_data = resample_pcm16_mono(
-                        scale_pcm16(data, self.output_volume),
-                        self.settings.sample_rate,
-                        self.output_sample_rate,
-                    )
-                    writes.append(
-                        asyncio.to_thread(self._output_stream.write, device_data)
-                    )
-                    targets.append("output")
-                if self._audience_stream is not None and self.audience is not None:
-                    audience_data = resample_pcm16_mono(
-                        scale_pcm16(data, self.audience.volume),
-                        self.settings.sample_rate,
-                        self.audience.sample_rate,
-                    )
-                    writes.append(
-                        asyncio.to_thread(self._audience_stream.write, audience_data)
-                    )
-                    targets.append("audience")
-                results = await asyncio.gather(*writes, return_exceptions=True)
-                for target, result in zip(targets, results):
-                    if not isinstance(result, Exception):
-                        continue
-                    if target == "output":
-                        logger.warning("受話器出力が切断されました: %s", result)
-                        await self._close_output_stream("_output_stream")
-                    else:
-                        logger.warning("観客用出力が切断されました: %s", result)
-                        await self._close_output_stream("_audience_stream")
+            if self._output_worker is not None:
+                device_data = resample_pcm16_mono(
+                    scale_pcm16(data, self.output_volume),
+                    self.settings.sample_rate,
+                    self.output_sample_rate,
+                )
+                self._output_worker.put(device_data)
+            if self._audience_worker is not None and self.audience is not None:
+                audience_data = resample_pcm16_mono(
+                    scale_pcm16(data, self.audience.volume),
+                    self.settings.sample_rate,
+                    self.audience.sample_rate,
+                )
+                self._audience_worker.put(audience_data)
             self.output_queue.task_done()
 
     async def play(self, data: bytes) -> None:
@@ -938,17 +1136,28 @@ class AudioDevice:
     async def wait_until_played(self) -> None:
         """再生待ちの音声がなくなるまで待つ。"""
         await self.output_queue.join()
+        workers = [
+            worker
+            for worker in (self._output_worker, self._audience_worker)
+            if worker is not None and not worker.closed
+        ]
+        if workers:
+            await asyncio.gather(
+                *(asyncio.to_thread(worker.join) for worker in workers)
+            )
 
-    async def _close_output_stream(self, attribute: str) -> None:
-        stream = getattr(self, attribute)
-        if stream is None:
-            return
-        for action in (stream.abort, stream.close):
-            try:
-                await asyncio.to_thread(action)
-            except Exception:
-                pass
-        setattr(self, attribute, None)
+    async def _stop_output_workers(self, *, discard: bool) -> None:
+        workers = [
+            worker
+            for worker in (self._output_worker, self._audience_worker)
+            if worker is not None
+        ]
+        if workers:
+            await asyncio.gather(
+                *(asyncio.to_thread(worker.stop, discard=discard) for worker in workers)
+            )
+        self._output_worker = None
+        self._audience_worker = None
 
     def clear_input_queue(self) -> None:
         """担当切替前に録音された古い音声を、新しい担当へ送らないよう捨てる。"""
@@ -989,7 +1198,7 @@ class AudioDevice:
                 for offset in range(0, len(pcm), bytes_per_block):
                     await self.output_queue.put(pcm[offset : offset + bytes_per_block])
                     # 一度に大量の保留音を積まず、停止時にすぐ切り替えられるようにする。
-                    await self.output_queue.join()
+                    await self.wait_until_played()
         except asyncio.CancelledError:
             return
 
@@ -1003,6 +1212,9 @@ class AudioDevice:
         while not self.output_queue.empty():
             self.output_queue.get_nowait()
             self.output_queue.task_done()
+        for worker in (self._output_worker, self._audience_worker):
+            if worker is not None:
+                worker.discard_pending()
 
     def build_busy_tone(self, repeats: int = 3) -> bytes:
         """400Hzを0.5秒鳴らし、0.5秒休む話中音をPCM16で作る。"""
@@ -1028,11 +1240,12 @@ class AudioDevice:
             while not self.output_queue.empty():
                 self.output_queue.get_nowait()
                 self.output_queue.task_done()
+            await self._stop_output_workers(discard=True)
             await self.output_queue.put(None)
             await self._play_task
             self._play_task = None
 
-        for stream in (self._input_stream, self._output_stream, self._audience_stream):
+        for stream in (self._input_stream,):
             if stream is not None:
                 try:
                     await asyncio.to_thread(stream.stop)
