@@ -79,7 +79,8 @@ class GPTLiveSessionTest(unittest.TestCase):
 
         instructions = session._session_start_event()["session"]["instructions"]
 
-        self.assertIn("『守口市役所』を『もりぐちしやくしょ』", instructions)
+        self.assertIn("『守口市役所』は必ず『もりぐちしやくしょ』", instructions)
+        self.assertIn("『まもりくち』という読み方は禁止", instructions)
         self.assertIn("『還付金』を『かんぷきん』", instructions)
         self.assertIn("『22,560円』は", instructions)
 

@@ -10,6 +10,11 @@ class RefundFraudScenarioTest(unittest.TestCase):
 
     def test_uses_fictional_refund_scam_details(self):
         self.assertIn("守口市役所", self.scenario)
+        self.assertIn(
+            "突然のお電話で失礼します。もりぐち市役所、保険年金課の佐藤と申します。",
+            self.scenario,
+        )
+        self.assertIn("「まもりくち市役所」とは絶対に言わない", self.scenario)
         self.assertNotIn("朝凪市役所", self.scenario)
         self.assertIn("保険年金課", self.scenario)
         self.assertIn("佐藤", self.scenario)
