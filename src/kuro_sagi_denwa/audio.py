@@ -1172,6 +1172,21 @@ class AudioDevice:
         await self.play(tone)
         await self.wait_until_played()
 
+    async def play_audio_file(self, path: str | Path, volume: float = 1.0) -> None:
+        """音声ファイルを受話器と観客用出力へ1回だけ再生する。"""
+        import miniaudio
+
+        sound = await asyncio.to_thread(
+            miniaudio.decode_file,
+            str(path),
+            output_format=miniaudio.SampleFormat.SIGNED16,
+            nchannels=1,
+            sample_rate=self.settings.sample_rate,
+        )
+        pcm = await asyncio.to_thread(scale_pcm16, sound.samples, volume)
+        await self.play(pcm)
+        await self.wait_until_played()
+
     async def start_hold_music(self, path: str, volume: float = 0.15) -> None:
         """MP3の保留音を小さな音量で繰り返し再生する。"""
         await self.stop_hold_music()

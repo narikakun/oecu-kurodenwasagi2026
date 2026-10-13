@@ -1,10 +1,13 @@
 import asyncio
+import sys
 import unittest
 
 from array import array
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from kuro_sagi_denwa.audio import (
     AudienceOutput,
@@ -375,6 +378,23 @@ class BellRingerStreamTest(unittest.IsolatedAsyncioTestCase):
 
 
 class AudioDeviceAudienceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_plays_audio_file_once_and_waits_until_finished(self):
+        fake_miniaudio = SimpleNamespace(
+            SampleFormat=SimpleNamespace(SIGNED16=None),
+            decode_file=lambda *args, **kwargs: SimpleNamespace(
+                samples=[1000, -1000]
+            ),
+        )
+        audio = AudioDevice(Settings(api_key="test"))
+        audio.play = AsyncMock()
+        audio.wait_until_played = AsyncMock()
+
+        with patch.dict(sys.modules, {"miniaudio": fake_miniaudio}):
+            await audio.play_audio_file("disconnect.mp3", volume=0.5)
+
+        audio.play.assert_awaited_once_with(array("h", [500, -500]).tobytes())
+        audio.wait_until_played.assert_awaited_once_with()
+
     async def test_slow_audience_output_does_not_block_handset_output(self):
         import threading
 

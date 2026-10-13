@@ -19,6 +19,7 @@ class DummyAudio:
         self.input_queue = asyncio.Queue()
         self.played = []
         self.wait_count = 0
+        self.played_files = []
         self.clear_count = 0
         self.start_count = 0
         self.stop_count = 0
@@ -34,6 +35,9 @@ class DummyAudio:
 
     async def wait_until_played(self):
         self.wait_count += 1
+
+    async def play_audio_file(self, path, volume=1.0):
+        self.played_files.append((path, volume))
 
     def clear_input_queue(self):
         self.clear_count += 1
@@ -244,6 +248,41 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
                 }
             ],
         )
+
+    async def test_disconnect_sound_plays_once_before_feedback_resumes(self):
+        audio = DummyAudio()
+        session = GPTLiveSession(Settings(api_key="test-key"), audio)
+        session.websocket = FakeWebSocket()
+
+        session._log_transcript(
+            {
+                "type": "session.output_transcript.delta",
+                "delta": "承知しました。それでは失礼します",
+            }
+        )
+        self.assertIsNotNone(session._feedback_transition_task)
+        await session._feedback_transition_task
+
+        self.assertEqual(
+            audio.played_files,
+            [(session.DISCONNECT_AUDIO_PATH, 1.0)],
+        )
+        self.assertEqual(
+            session.websocket.sent,
+            [
+                {
+                    "type": "session.instructions.append",
+                    "event_id": "resume_feedback_after_disconnect",
+                    "delegation_id": None,
+                    "content": session.FEEDBACK_RESUME_INSTRUCTION,
+                }
+            ],
+        )
+
+        session._log_transcript(
+            {"type": "session.output_transcript.delta", "delta": "。それでは失礼します"}
+        )
+        self.assertEqual(len(audio.played_files), 1)
 
     async def test_assistant_caption_restores_official_moriguchi_spelling(self):
         display = FakeDisplay()
