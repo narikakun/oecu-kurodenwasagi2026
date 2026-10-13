@@ -266,8 +266,41 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
                 await session.prepare()
 
         self.assertIn("GPT-Liveセッションへ接続します", logs.output[0])
-        self.assertIn("GPT-Liveセッションを開始しました", logs.output[-1])
+        self.assertIn("GPT-Liveセッションを開始しました", "\n".join(logs.output))
+        self.assertIn("最初の「もしもし？」を先行準備", logs.output[-1])
+        self.assertEqual(websocket.sent[-1], session._greeting_event())
         self.assertTrue(session._prepared)
+
+    async def test_tracks_greeting_generated_during_ring_before_unmute_ack(self):
+        audio = DummyAudio()
+        session = GPTLiveSession(Settings(api_key="test-key"), audio)
+        session._mark_greeting_requested("initial_greeting")
+        session.websocket = FakeWebSocket(
+            [
+                {
+                    "type": "session.instructions.appended",
+                    "client_event_id": "initial_greeting",
+                },
+                {
+                    "type": "session.output_audio.delta",
+                    "delta": base64.b64encode(b"prefetched greeting").decode("ascii"),
+                },
+                {"type": "session.output_transcript.delta", "delta": "もしもし？"},
+                {
+                    "type": "session.input_audio.unmuted",
+                    "client_event_id": "handset_up_unmute",
+                },
+            ]
+        )
+
+        await session._wait_for_ack(
+            "session.input_audio.unmuted", "handset_up_unmute"
+        )
+
+        self.assertTrue(session._greeting_instruction_accepted)
+        self.assertTrue(session._greeting_audio_received)
+        self.assertEqual(session._greeting_transcript, "もしもし？")
+        self.assertEqual(audio.played, [b"prefetched greeting"])
 
     async def test_waits_for_initial_greeting_before_conversation(self):
         audio = DummyAudio()
