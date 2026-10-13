@@ -93,11 +93,12 @@ function status_label(string $status): string
     .summary { display:flex; flex-wrap:wrap; gap:.75rem 1.5rem; padding:1rem; margin-bottom:1.25rem; background:var(--panel); border:1px solid var(--line); border-radius:10px; font-size:.85rem; }
     .summary span { color:var(--muted); }
     .messages { max-width:900px; }
-    .message { width:fit-content; max-width:82%; margin:.7rem 0; padding:.75rem .9rem; border-radius:12px; background:#e6ded1; white-space:pre-wrap; overflow-wrap:anywhere; }
+    .message { width:fit-content; max-width:82%; margin:.4rem 0; padding:.5rem .7rem; border-radius:10px; background:#e6ded1; overflow-wrap:anywhere; }
     .message.assistant { margin-right:auto; border-bottom-left-radius:3px; }
     .message.user { margin-left:auto; background:#f0dede; border-bottom-right-radius:3px; }
-    .speaker { margin-bottom:.25rem; color:var(--muted); font-size:.72rem; }
-    .time { margin-top:.35rem; color:var(--muted); font-size:.7rem; text-align:right; }
+    .speaker { margin-bottom:.12rem; color:var(--muted); font-size:.72rem; }
+    .message-text { line-height:1.45; white-space:pre-wrap; }
+    .time { margin-top:.2rem; color:var(--muted); font-size:.7rem; text-align:right; }
     .empty { padding:2rem; color:var(--muted); text-align:center; border:1px dashed var(--line); border-radius:10px; }
     @media (max-width:760px) { main { grid-template-columns:1fr; } nav { max-height:38vh; border-right:0; border-bottom:1px solid var(--line); } .message { max-width:94%; } }
   </style>
@@ -134,7 +135,7 @@ function status_label(string $status): string
         <?php foreach ($messages as $message): ?>
           <div class="message <?= h($message['speaker']) ?>">
             <div class="speaker"><?= $message['speaker'] === 'assistant' ? 'AI' : '参加者' ?></div>
-            <?= nl2br(h($message['transcript_text'])) ?>
+            <div class="message-text"><?= nl2br(h($message['transcript_text'])) ?></div>
             <div class="time"><?= h(local_time($message['occurred_at'], $timezone)) ?></div>
           </div>
         <?php endforeach; ?>
