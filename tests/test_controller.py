@@ -142,6 +142,19 @@ class PhoneControllerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.prepare_count, 1)
         self.assertEqual(session.start_count, 0)
 
+    async def test_prepares_live_session_during_ring_delay(self):
+        session = FakeSession()
+        ringer = FakeRinger()
+        controller = PhoneController(session, ringer)
+
+        await controller.handle(HardwareEvent(HardwareEventType.DIAL, 3))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        self.assertEqual(session.prepare_count, 1)
+        self.assertEqual(ringer.start_count, 0)
+        await controller.close()
+
     async def test_lifting_handset_cancels_bell_and_starts_conversation(self):
         session = FakeSession()
         ringer = FakeRinger()

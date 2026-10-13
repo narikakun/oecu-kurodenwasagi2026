@@ -255,15 +255,7 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
     async def test_prepare_logs_session_start(self):
         audio = DummyAudio()
         session = GPTLiveSession(Settings(api_key="test-key"), audio)
-        websocket = FakeWebSocket(
-            [
-                {"type": "session.started"},
-                {
-                    "type": "session.input_audio.muted",
-                    "client_event_id": "pre_ring_mute",
-                },
-            ]
-        )
+        websocket = FakeWebSocket([{"type": "session.started"}])
 
         fake_websockets = SimpleNamespace(
             connect=AsyncMock(return_value=websocket)
@@ -276,6 +268,9 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("GPT-Liveセッションを開始しました", "\n".join(logs.output))
         self.assertIn("最初の「もしもし？」を先行準備", logs.output[-1])
         self.assertEqual(websocket.sent[-1], session._greeting_event())
+        self.assertFalse(
+            any(event["type"] == "session.input_audio.mute" for event in websocket.sent)
+        )
         self.assertTrue(session._prepared)
 
     async def test_tracks_greeting_generated_during_ring_before_unmute_ack(self):

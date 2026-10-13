@@ -131,6 +131,7 @@ class GPTLiveSession:
         self.websocket: Any = None
         self._sender_task: asyncio.Task[None] | None = None
         self._receiver_task: asyncio.Task[None] | None = None
+        self._prepare_lock = asyncio.Lock()
         self._closed_event = asyncio.Event()
         self._prepared = False
         self._transcript_buffers: dict[str, str] = {}
@@ -146,10 +147,13 @@ class GPTLiveSession:
         return self._receiver_task is not None
 
     async def prepare(self) -> None:
-        """ベル中に接続だけを済ませ、受話器を上げるまで入力をミュートする。"""
+        """呼び出し前に接続し、入力送信前に最初の挨拶を準備する。"""
+        async with self._prepare_lock:
+            await self._prepare_locked()
+
+    async def _prepare_locked(self) -> None:
         if self._prepared and self.websocket is not None:
             return
-
         import websockets
 
         try:
@@ -162,14 +166,10 @@ class GPTLiveSession:
             )
             await self._send_event(self._session_start_event())
             await self._wait_until_started()
-            await self._send_event(
-                {"type": "session.input_audio.mute", "event_id": "pre_ring_mute"}
-            )
-            await self._wait_for_ack("session.input_audio.muted", "pre_ring_mute")
             self._mark_greeting_requested("initial_greeting")
             await self._send_event(self._greeting_event())
             self._prepared = True
-            logger.info("GPT-Liveセッションを開始しました（入力ミュート中）")
+            logger.info("GPT-Liveセッションを開始しました（音声入力開始前）")
             logger.info("最初の「もしもし？」を先行準備します")
         except asyncio.CancelledError:
             logger.info("GPT-Liveセッションの開始を中止します")
@@ -190,17 +190,9 @@ class GPTLiveSession:
             await self.prepare()
             await self.audio.start()
 
-            # マイクを先に準備し、サーバーのミュート解除を確認してから送信を始める。
-            # 先行指示した挨拶の再生中も入力を継続する。
+            # prepare中はマイク音声を送っていないため、サーバー側のミュートは不要。
+            # 受話器を上げた時点から入力を送り、先行生成済みの挨拶を受信する。
             self.audio.clear_input_queue()
-            await self._send_event(
-                {"type": "session.input_audio.unmute", "event_id": "handset_up_unmute"}
-            )
-            logger.info("GPT-Liveの入力ミュート解除を待ちます")
-            await self._wait_for_ack(
-                "session.input_audio.unmuted", "handset_up_unmute"
-            )
-            logger.info("GPT-Liveの入力ミュート解除を確認しました")
             await self._send_first_audio_packet()
             self._sender_task = asyncio.create_task(self._send_audio_loop())
             self._sender_task.add_done_callback(self._report_sender_failure)
