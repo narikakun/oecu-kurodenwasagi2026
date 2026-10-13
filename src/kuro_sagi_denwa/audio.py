@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Settings
+from .power import is_raspberry_pi, shutdown_raspberry_pi
 
 logger = logging.getLogger(__name__)
 
@@ -512,6 +513,8 @@ class AudioDeviceSelector:
         self.active = False
         self._pending_target: str | None = None
         self._pending_kind: str | None = None
+        self._can_shutdown = is_raspberry_pi()
+        self._shutdown_task: asyncio.Task[None] | None = None
 
     def restore(self) -> None:
         """保存したデバイスを復元し、見つからない項目はOS既定へ戻す。"""
@@ -592,6 +595,12 @@ class AudioDeviceSelector:
             self.display.publish({"type": "settings", "active": False})
 
     def handle_digit(self, digit: int) -> None:
+        if not self.active:
+            return
+        if self._shutdown_task is not None and not self._shutdown_task.done():
+            return
+        if self._pending_kind == "shutdown_running":
+            return
         if digit == self.BACK_DIGIT:
             if self._pending_target is not None:
                 logger.info("ひとつ前の音声設定メニューへ戻ります")
@@ -603,7 +612,27 @@ class AudioDeviceSelector:
                 self.exit()
             return
 
+        if self._pending_kind == "shutdown":
+            if digit == 9:
+                self._pending_kind = "shutdown_running"
+                self._show_on_display(
+                    title="電源を切っています",
+                    subtitle="シャットダウン完了後に電源ケーブルを抜いてください",
+                )
+                self._shutdown_task = asyncio.create_task(self._shutdown())
+            return
+
         if self._pending_target is None:
+            if digit == 8 and self._can_shutdown:
+                self._pending_target = "shutdown"
+                self._pending_kind = "shutdown"
+                self._show_on_display(
+                    title="Raspberry Piの電源を切りますか？",
+                    subtitle="電源を切ると、再び使うには起動が必要です",
+                    choices=["9 電源を切る"],
+                    footer="7：キャンセルして設定へ戻る",
+                )
+                return
             target = self.TARGETS.get(digit)
             if target is not None:
                 label, self._pending_target = target
@@ -656,6 +685,20 @@ class AudioDeviceSelector:
         self._show_menu()
         logger.info("続けて0から6を回すか、受話器を上げて設定を終了してください")
 
+    async def _shutdown(self) -> None:
+        try:
+            await asyncio.to_thread(shutdown_raspberry_pi)
+        except Exception:
+            logger.exception("Raspberry Piのシャットダウンに失敗しました")
+            self._pending_target = None
+            self._pending_kind = None
+            if self.active:
+                self._show_on_display(
+                    title="電源を切れませんでした",
+                    subtitle="shutdownコマンドの実行権限を確認してください",
+                    footer="7：設定を閉じる",
+                )
+
     def _show_menu(self) -> None:
         input_description, output_description, bell_description, audience_description = (
             self._current_descriptions()
@@ -685,7 +728,7 @@ class AudioDeviceSelector:
             choices=[
                 "0 受話器入力", "1 受話器出力", "2 ベル出力", "3 観客用出力",
                 "4 受話器音量", "5 ベル音量", "6 観客用音量",
-            ],
+            ] + (["8 Raspberry Piの電源を切る"] if self._can_shutdown else []),
             footer="7：設定を閉じる",
         )
 
