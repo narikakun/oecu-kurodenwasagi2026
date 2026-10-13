@@ -1,6 +1,6 @@
 # 会話記録サーバーの設置
 
-PHP 8.1以上（PDO MySQL・mbstring）、MySQL 5.7以上またはMariaDB 10.3以上を想定しています。公開時は必ずHTTPSを使用してください。
+PHP 7.4以上（PDO MySQL・mbstring）、MySQL 5.7以上またはMariaDB 10.3以上を想定しています。公開時は必ずHTTPSを使用してください。
 
 ## 1. MySQLテーブルを作成
 

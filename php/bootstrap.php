@@ -62,7 +62,7 @@ function request_authorization(): string
     return '';
 }
 
-function json_response(int $status, array $body): never
+function json_response(int $status, array $body): void
 {
     http_response_code($status);
     header('Content-Type: application/json; charset=utf-8');
@@ -81,7 +81,7 @@ function require_dashboard_auth(): void
         $authorization = request_authorization();
         if (stripos($authorization, 'Basic ') === 0) {
             $decoded = base64_decode(substr($authorization, 6), true);
-            if ($decoded !== false && str_contains($decoded, ':')) {
+            if ($decoded !== false && strpos($decoded, ':') !== false) {
                 [$username, $password] = explode(':', $decoded, 2);
             }
         }

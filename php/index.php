@@ -55,13 +55,13 @@ function local_time(?string $value, DateTimeZone $timezone, bool $seconds = true
 
 function status_label(string $status): string
 {
-    return match ($status) {
+    $labels = [
         'active' => '通話中',
         'completed' => '完了',
         'cancelled' => '開始中止',
         'error' => 'エラー',
-        default => $status,
-    };
+    ];
+    return $labels[$status] ?? $status;
 }
 ?>
 <!doctype html>
