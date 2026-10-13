@@ -108,6 +108,7 @@ class GPTLiveSession:
         "言い終えたら相手の返事を待ってください。"
     )
     GREETING_TIMEOUT_SECONDS = 3
+    CONTROL_ACK_TIMEOUT_SECONDS = 15
     TRANSCRIPT_IDLE_SECONDS = 1.0
     TRANSCRIPT_SENTENCE_SECONDS = 0.15
 
@@ -180,18 +181,21 @@ class GPTLiveSession:
             await self.prepare()
             await self.audio.start()
 
-            # GPT-Liveのタイムラインを進めるため、入力音声の送信を開始してから
-            # 挨拶指示を送り、挨拶の処理中も入力ストリームを継続する。
+            # マイクを先に準備し、サーバーのミュート解除を確認してから送信を始める。
+            # 挨拶指示より前に送信タスクを開始し、挨拶中も入力を継続する。
             self.audio.clear_input_queue()
-            self._sender_task = asyncio.create_task(self._send_audio_loop())
-            self._sender_task.add_done_callback(self._report_sender_failure)
             await self._send_event(
                 {"type": "session.input_audio.unmute", "event_id": "handset_up_unmute"}
             )
+            logger.info("GPT-Liveの入力ミュート解除を待ちます")
             await self._wait_for_ack(
                 "session.input_audio.unmuted", "handset_up_unmute"
             )
+            logger.info("GPT-Liveの入力ミュート解除を確認しました")
+            self._sender_task = asyncio.create_task(self._send_audio_loop())
+            self._sender_task.add_done_callback(self._report_sender_failure)
             await self._send_event(self._greeting_event())
+            logger.info("GPT-Liveへ最初の「もしもし？」を指示しました")
             await self._wait_until_greeting_accepted()
 
             # 挨拶後は通常の受信ループへ引き継ぐ。
@@ -361,9 +365,23 @@ class GPTLiveSession:
 
     async def _wait_until_started(self) -> None:
         assert self.websocket is not None
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.CONTROL_ACK_TIMEOUT_SECONDS
+        timeout_label = f"{self.CONTROL_ACK_TIMEOUT_SECONDS:g}秒以内"
         while True:
-            raw = await asyncio.wait_for(self.websocket.recv(), timeout=15)
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise RuntimeError(
+                    f"GPT-Liveの開始確認が{timeout_label}に返りませんでした"
+                )
+            try:
+                raw = await asyncio.wait_for(self.websocket.recv(), timeout=remaining)
+            except asyncio.TimeoutError as error:
+                raise RuntimeError(
+                    f"GPT-Liveの開始確認が{timeout_label}に返りませんでした"
+                ) from error
             event = json.loads(raw)
+            logger.debug("GPT-Live開始待機イベント: %s", event.get("type"))
             if event.get("type") == "session.started":
                 return
             if event.get("type") == "error":
@@ -372,13 +390,32 @@ class GPTLiveSession:
 
     async def _wait_for_ack(self, event_type: str, client_event_id: str) -> None:
         assert self.websocket is not None
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.CONTROL_ACK_TIMEOUT_SECONDS
+        timeout_label = f"{self.CONTROL_ACK_TIMEOUT_SECONDS:g}秒以内"
+        last_event_type = "なし"
         while True:
-            raw = await asyncio.wait_for(self.websocket.recv(), timeout=15)
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise RuntimeError(
+                    f"GPT-Liveから{event_type}が{timeout_label}に返りませんでした"
+                    f"（最後のイベント: {last_event_type}）"
+                )
+            try:
+                raw = await asyncio.wait_for(self.websocket.recv(), timeout=remaining)
+            except asyncio.TimeoutError as error:
+                raise RuntimeError(
+                    f"GPT-Liveから{event_type}が{timeout_label}に返りませんでした"
+                    f"（最後のイベント: {last_event_type}）"
+                ) from error
             event = json.loads(raw)
+            last_event_type = str(event.get("type", "不明"))
+            logger.debug("GPT-Live制御待機イベント: %s", last_event_type)
             await self._handle_server_event(event)
-            if (
-                event.get("type") == event_type
-                and event.get("client_event_id") == client_event_id
+            received_client_event_id = event.get("client_event_id")
+            if event.get("type") == event_type and (
+                received_client_event_id is None
+                or received_client_event_id == client_event_id
             ):
                 return
 
@@ -390,14 +427,19 @@ class GPTLiveSession:
         greeting_transcript = ""
         greeting_event_ids = {"initial_greeting"}
         retried = False
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.GREETING_TIMEOUT_SECONDS
         while not (
             instruction_accepted
             and audio_received
             and "もしもし" in greeting_transcript
         ):
             try:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
                 raw = await asyncio.wait_for(
-                    self.websocket.recv(), timeout=self.GREETING_TIMEOUT_SECONDS
+                    self.websocket.recv(), timeout=remaining
                 )
             except asyncio.TimeoutError:
                 if retried:
@@ -411,12 +453,15 @@ class GPTLiveSession:
                 )
                 await self._send_event(self._greeting_event(retry_event_id))
                 retried = True
+                deadline = loop.time() + self.GREETING_TIMEOUT_SECONDS
                 continue
             event = json.loads(raw)
+            logger.debug("GPT-Live挨拶待機イベント: %s", event.get("type"))
             await self._handle_server_event(event)
-            if (
-                event.get("type") == "session.instructions.appended"
-                and event.get("client_event_id") in greeting_event_ids
+            received_client_event_id = event.get("client_event_id")
+            if event.get("type") == "session.instructions.appended" and (
+                received_client_event_id is None
+                or received_client_event_id in greeting_event_ids
             ):
                 instruction_accepted = True
             elif event.get("type") == "session.output_audio.delta":

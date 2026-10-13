@@ -308,6 +308,34 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
 
         await session._wait_for_ack("session.input_audio.muted", "pre_ring_mute")
 
+    async def test_accepts_audio_control_ack_without_optional_client_event_id(self):
+        session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio())
+        session.websocket = FakeWebSocket(
+            [{"type": "session.input_audio.unmuted"}]
+        )
+
+        await session._wait_for_ack(
+            "session.input_audio.unmuted", "handset_up_unmute"
+        )
+
+    async def test_audio_control_ack_has_absolute_timeout_despite_other_events(self):
+        class NoisyWebSocket(FakeWebSocket):
+            async def recv(self):
+                await asyncio.sleep(0)
+                return json.dumps({"type": "session.info"})
+
+        session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio())
+        session.CONTROL_ACK_TIMEOUT_SECONDS = 0.01
+        session.websocket = NoisyWebSocket()
+
+        with self.assertRaisesRegex(RuntimeError, "0.01秒以内"):
+            await asyncio.wait_for(
+                session._wait_for_ack(
+                    "session.input_audio.unmuted", "handset_up_unmute"
+                ),
+                timeout=0.2,
+            )
+
     async def test_stop_closes_prepared_session_without_receiver_loop(self):
         audio = DummyAudio()
         session = GPTLiveSession(Settings(api_key="test-key"), audio)
@@ -381,6 +409,24 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(audio.played, [b"moshimoshi"])
         self.assertEqual(audio.wait_count, 1)
 
+    async def test_accepts_greeting_ack_without_optional_client_event_id(self):
+        audio = DummyAudio()
+        session = GPTLiveSession(Settings(api_key="test-key"), audio)
+        session.websocket = FakeWebSocket(
+            [
+                {"type": "session.instructions.appended"},
+                {
+                    "type": "session.output_audio.delta",
+                    "delta": base64.b64encode(b"moshimoshi").decode("ascii"),
+                },
+                {"type": "session.output_transcript.delta", "delta": "もしもし"},
+            ]
+        )
+
+        await session._wait_until_greeting_accepted()
+
+        self.assertEqual(audio.played, [b"moshimoshi"])
+
     async def test_retries_greeting_once_when_no_speech_arrives(self):
         audio = DummyAudio()
         session = GPTLiveSession(Settings(api_key="test-key"), audio)
@@ -411,6 +457,26 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
             [session._greeting_event("initial_greeting_retry")],
         )
         self.assertIn("挨拶を再送します", logs.output[0])
+
+    async def test_greeting_has_absolute_timeout_despite_other_events(self):
+        class NoisyWebSocket(FakeWebSocket):
+            async def recv(self):
+                await asyncio.sleep(0)
+                return json.dumps({"type": "session.info"})
+
+        session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio())
+        session.GREETING_TIMEOUT_SECONDS = 0.01
+        session.websocket = NoisyWebSocket()
+
+        with self.assertRaisesRegex(RuntimeError, "初回挨拶"):
+            await asyncio.wait_for(
+                session._wait_until_greeting_accepted(), timeout=0.2
+            )
+
+        self.assertEqual(
+            session.websocket.sent,
+            [session._greeting_event("initial_greeting_retry")],
+        )
 
     async def test_logs_only_input_and_output_transcripts(self):
         display = FakeDisplay()
