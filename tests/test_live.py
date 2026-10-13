@@ -478,6 +478,35 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
             [session._greeting_event("initial_greeting_retry")],
         )
 
+    async def test_starts_after_retry_when_greeting_audio_has_no_transcript(self):
+        audio = DummyAudio()
+        session = GPTLiveSession(Settings(api_key="test-key"), audio)
+        session.websocket = FakeWebSocket(
+            [
+                {
+                    "type": "session.instructions.appended",
+                    "client_event_id": "initial_greeting",
+                },
+                {
+                    "type": "session.output_audio.delta",
+                    "delta": base64.b64encode(b"moshimoshi").decode("ascii"),
+                },
+                asyncio.TimeoutError(),
+                asyncio.TimeoutError(),
+            ]
+        )
+
+        with self.assertLogs("kuro_sagi_denwa.live", level="WARNING") as logs:
+            await session._wait_until_greeting_accepted()
+
+        self.assertEqual(audio.played, [b"moshimoshi"])
+        self.assertEqual(audio.wait_count, 1)
+        self.assertEqual(
+            session.websocket.sent,
+            [session._greeting_event("initial_greeting_retry")],
+        )
+        self.assertIn("字幕は届きませんでした", logs.output[-1])
+
     async def test_logs_only_input_and_output_transcripts(self):
         display = FakeDisplay()
         session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio(), display)

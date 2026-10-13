@@ -429,6 +429,7 @@ class GPTLiveSession:
         greeting_transcript = ""
         greeting_event_ids = {"initial_greeting"}
         retried = False
+        verified_by_audio_only = False
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.GREETING_TIMEOUT_SECONDS
         while not (
@@ -445,6 +446,13 @@ class GPTLiveSession:
                 )
             except asyncio.TimeoutError:
                 if retried:
+                    if instruction_accepted and audio_received:
+                        verified_by_audio_only = True
+                        logger.warning(
+                            "初回挨拶の字幕は届きませんでしたが、"
+                            "指示受理と音声を確認できたため通話を開始します"
+                        )
+                        break
                     raise RuntimeError(
                         "GPT-Liveから初回挨拶「もしもし？」が返りませんでした"
                         f"（指示受理={instruction_accepted}、音声={audio_received}、"
@@ -479,7 +487,10 @@ class GPTLiveSession:
                 if isinstance(delta, str):
                     greeting_transcript += delta
         await self.audio.wait_until_played()
-        logger.info("GPT-Liveの初回挨拶を確認しました: %s", greeting_transcript)
+        if verified_by_audio_only:
+            logger.info("GPT-Liveの初回挨拶を音声で確認しました（字幕なし）")
+        else:
+            logger.info("GPT-Liveの初回挨拶を確認しました: %s", greeting_transcript)
 
     async def _send_first_audio_packet(self) -> None:
         """挨拶指示より前に入力タイムラインが動いていることを保証する。"""
