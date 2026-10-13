@@ -22,7 +22,7 @@ if ($contentLength > 65536) {
 $raw = file_get_contents('php://input');
 try {
     $payload = json_decode($raw === false ? '' : $raw, true, 32, JSON_THROW_ON_ERROR);
-} catch (JsonException) {
+} catch (JsonException $error) {
     json_response(400, ['ok' => false, 'error' => 'Invalid JSON']);
 }
 if (!is_array($payload)) {
@@ -39,7 +39,7 @@ if (!in_array($action, ['call_started', 'transcript', 'call_ended'], true)
 }
 try {
     $occurredAt = mysql_datetime((string)($payload['occurred_at'] ?? ''));
-} catch (Throwable) {
+} catch (Throwable $error) {
     json_response(422, ['ok' => false, 'error' => 'Invalid occurred_at']);
 }
 
