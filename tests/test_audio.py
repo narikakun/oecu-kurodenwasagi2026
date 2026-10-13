@@ -17,6 +17,7 @@ from kuro_sagi_denwa.audio import (
     _resolve_device,
     _supported_sample_rate,
     resample_pcm16_mono,
+    scale_pcm16,
 )
 from kuro_sagi_denwa.config import Settings
 
@@ -369,6 +370,23 @@ class AudioDeviceTest(unittest.TestCase):
 
         self.assertTrue(audio.input_queue.empty())
 
+    def test_capture_backlog_keeps_recent_audio_within_200ms(self):
+        audio = AudioDevice(Settings(api_key="test", audio_device_sample_rate=24_000))
+        audio._loop = SimpleNamespace(call_soon_threadsafe=lambda callback: callback())
+        for index in range(100):
+            audio._capture_callback(array("h", [index] * 480).tobytes(), 480, None, None)
+        self.assertEqual(audio.input_queue.qsize(), 10)
+        packet = audio.input_queue.get_nowait()
+        self.assertEqual(array("h", packet)[0], 90)
+        audio.input_queue.task_done()
+        audio.clear_input_queue()
+        self.assertEqual(audio.input_queue._unfinished_tasks, 0)
+
+    def test_vectorized_volume_preserves_truncation_and_clips(self):
+        source = array("h", [-32768, -3, 0, 3, 32767])
+        self.assertEqual(array("h", scale_pcm16(source, 0.5)).tolist(), [-16384, -1, 0, 1, 16383])
+        self.assertEqual(array("h", scale_pcm16(source.tobytes(), 2)).tolist(), [-32768, -6, 0, 6, 32767])
+
     def test_busy_tone_has_expected_pcm_length(self):
         settings = Settings(api_key="test", sample_rate=24_000)
         audio = AudioDevice(settings)
@@ -469,6 +487,37 @@ class BellRingerStreamTest(unittest.IsolatedAsyncioTestCase):
 
 
 class AudioDeviceAudienceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_output_conversion_does_not_block_event_loop(self):
+        import threading
+
+        entered = threading.Event()
+        release = threading.Event()
+        completed = []
+        audio = AudioDevice(Settings(api_key="test", audio_device_sample_rate=24_000))
+        audio._output_stream = Mock(write=Mock(return_value=False))
+
+        def slow_scale(data, volume):
+            entered.set()
+            completed.append(release.wait(timeout=1))
+            return data
+
+        with patch("kuro_sagi_denwa.audio.scale_pcm16", side_effect=slow_scale):
+            task = asyncio.create_task(audio._play_loop())
+            try:
+                await audio.play(bytes(960))
+                self.assertTrue(await asyncio.to_thread(entered.wait, 0.5))
+                # 変換が待機中でもイベントループから解放できることを確認する。
+                release.set()
+                await audio.output_queue.put(None)
+                await asyncio.wait_for(task, timeout=2)
+                self.assertEqual(completed, [True])
+            finally:
+                release.set()
+                if not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                    await audio._stop_output_workers(discard=True)
+
     async def test_plays_audio_file_once_and_waits_until_finished(self):
         fake_miniaudio = SimpleNamespace(
             SampleFormat=SimpleNamespace(SIGNED16=None),

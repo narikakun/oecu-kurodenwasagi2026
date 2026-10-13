@@ -12,6 +12,8 @@ from array import array
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from .config import Settings
 from .power import is_raspberry_pi, shutdown_raspberry_pi
 
@@ -28,11 +30,13 @@ class _OutputWorker:
         *,
         prebuffer_bytes: int = 0,
         on_closed=None,
+        transform=None,
     ) -> None:
         self.stream = stream
         self.label = label
         self.prebuffer_bytes = max(0, prebuffer_bytes)
         self.on_closed = on_closed
+        self.transform = transform
         self.queue: queue.Queue[bytes | None] = queue.Queue(maxsize=50)
         self.thread = threading.Thread(
             target=self._run,
@@ -78,6 +82,8 @@ class _OutputWorker:
             logger.warning("%s再生スレッドを3秒以内に停止できませんでした", self.label)
 
     def _write(self, data: bytes) -> None:
+        if self.transform is not None:
+            data = self.transform(data)
         underflowed = self.stream.write(data)
         if underflowed:
             self.underflow_count += 1
@@ -987,10 +993,15 @@ class AudioDeviceSelector:
 
 def scale_pcm16(samples, volume: float) -> bytes:
     """PCM16のサンプル列へ音量を掛け、範囲外を切り詰める。"""
-    scaled = array("h", samples)
-    for index, sample in enumerate(scaled):
-        scaled[index] = max(-32768, min(32767, int(sample * volume)))
-    return scaled.tobytes()
+    source = (
+        np.frombuffer(samples, dtype=np.int16)
+        if isinstance(samples, (bytes, bytearray))
+        else np.asarray(samples, dtype=np.int16)
+    )
+    if volume == 1.0:
+        return source.tobytes()
+    scaled = np.clip(source.astype(np.float64) * volume, -32768, 32767)
+    return scaled.astype(np.int16).tobytes()
 
 
 def resample_pcm16_mono(pcm: bytes, source_rate: int, target_rate: int) -> bytes:
@@ -998,24 +1009,14 @@ def resample_pcm16_mono(pcm: bytes, source_rate: int, target_rate: int) -> bytes
     if source_rate == target_rate or not pcm:
         return pcm
 
-    source = array("h")
-    source.frombytes(pcm)
-    if not source:
+    source = np.frombuffer(pcm, dtype=np.int16)
+    if not len(source):
         return b""
 
     target_length = max(1, round(len(source) * target_rate / source_rate))
-    target = array("h")
-    for target_index in range(target_length):
-        position = target_index * source_rate / target_rate
-        left_index = min(int(position), len(source) - 1)
-        right_index = min(left_index + 1, len(source) - 1)
-        fraction = position - left_index
-        value = round(
-            source[left_index]
-            + (source[right_index] - source[left_index]) * fraction
-        )
-        target.append(value)
-    return target.tobytes()
+    positions = np.arange(target_length, dtype=np.float64) * source_rate / target_rate
+    values = np.interp(positions, np.arange(len(source)), source)
+    return np.rint(values).astype(np.int16).tobytes()
 
 
 class AudioDevice:
@@ -1039,7 +1040,11 @@ class AudioDevice:
         self.output_sample_rate = settings.audio_device_sample_rate
         self.output_volume = settings.audio_output_volume
         self.audience = audience
-        self.input_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=100)
+        # 20 msブロックなら10個。古い録音を何秒も送信し続けない。
+        self.input_queue: asyncio.Queue[bytes] = asyncio.Queue(
+            maxsize=max(1, 200 // settings.block_ms)
+        )
+        self.input_drop_count = 0
         self.output_queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=200)
         self._input_stream: Any = None
         self._output_stream: Any = None
@@ -1067,6 +1072,12 @@ class AudioDevice:
                 try:
                     self.input_queue.get_nowait()
                     self.input_queue.task_done()
+                    self.input_drop_count += 1
+                    if self.input_drop_count == 1 or self.input_drop_count % 100 == 0:
+                        logger.warning(
+                            "入力音声が滞留したため古い録音を破棄します（累計%dブロック）",
+                            self.input_drop_count,
+                        )
                 except asyncio.QueueEmpty:
                     pass
             self.input_queue.put_nowait(data)
@@ -1157,6 +1168,11 @@ class AudioDevice:
                 self._output_stream,
                 "受話器出力",
                 on_closed=lambda: setattr(self, "_output_stream", None),
+                transform=lambda data: resample_pcm16_mono(
+                    scale_pcm16(data, self.output_volume),
+                    self.settings.sample_rate,
+                    self.output_sample_rate,
+                ),
             )
             self._output_worker.start()
         if self._audience_stream is not None and self._audience_worker is None:
@@ -1164,8 +1180,13 @@ class AudioDevice:
             self._audience_worker = _OutputWorker(
                 self._audience_stream,
                 "観客用出力",
-                prebuffer_bytes=self.audience.sample_rate * 60 // 1_000 * 2,
+                prebuffer_bytes=self.settings.sample_rate * 60 // 1_000 * 2,
                 on_closed=lambda: setattr(self, "_audience_stream", None),
+                transform=lambda data: resample_pcm16_mono(
+                    scale_pcm16(data, self.audience.volume),
+                    self.settings.sample_rate,
+                    self.audience.sample_rate,
+                ),
             )
             self._audience_worker.start()
 
@@ -1178,19 +1199,9 @@ class AudioDevice:
                 await self._stop_output_workers(discard=False)
                 return
             if self._output_worker is not None:
-                device_data = resample_pcm16_mono(
-                    scale_pcm16(data, self.output_volume),
-                    self.settings.sample_rate,
-                    self.output_sample_rate,
-                )
-                self._output_worker.put(device_data)
+                self._output_worker.put(data)
             if self._audience_worker is not None and self.audience is not None:
-                audience_data = resample_pcm16_mono(
-                    scale_pcm16(data, self.audience.volume),
-                    self.settings.sample_rate,
-                    self.audience.sample_rate,
-                )
-                self._audience_worker.put(audience_data)
+                self._audience_worker.put(data)
             self.output_queue.task_done()
 
     async def play(self, data: bytes) -> None:

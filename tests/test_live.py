@@ -568,6 +568,53 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(audio.clear_count, 1)
         self.assertEqual(session._next_audio_send_time, 101.0)
 
+    async def test_audio_pacing_absorbs_send_cost_and_small_sleep_jitter(self):
+        session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio())
+        now = 100.0
+        sends = []
+
+        async def sleep(delay):
+            nonlocal now
+            now += delay + 0.001
+
+        async def send(event):
+            nonlocal now
+            sends.append(now)
+            now += 0.002
+
+        session._send_event = send
+        clock = SimpleNamespace(time=lambda: now)
+        with patch("kuro_sagi_denwa.live.asyncio.get_running_loop", return_value=clock), \
+             patch("kuro_sagi_denwa.live.asyncio.sleep", side_effect=sleep):
+            for _ in range(101):
+                await session._send_audio_packet(bytes(960))
+
+        # 2秒の音声で毎回の3msのコストを蓄積しない。
+        self.assertLess(sends[-1] - sends[0], 2.01)
+        self.assertGreaterEqual(min(b - a for a, b in zip(sends, sends[1:])), 0.02 / 1.1 - 1e-9)
+
+    async def test_slow_send_does_not_add_an_extra_packet_wait(self):
+        session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio())
+        now = 100.0
+        sleeps = []
+
+        async def sleep(delay):
+            nonlocal now
+            sleeps.append(delay)
+            now += delay
+
+        async def send(event):
+            nonlocal now
+            now += 0.05
+
+        session._send_event = send
+        clock = SimpleNamespace(time=lambda: now)
+        with patch("kuro_sagi_denwa.live.asyncio.get_running_loop", return_value=clock), \
+             patch("kuro_sagi_denwa.live.asyncio.sleep", side_effect=sleep):
+            await session._send_audio_packet(bytes(960))
+            await session._send_audio_packet(bytes(960))
+        self.assertEqual(sleeps, [])
+
     async def test_sends_first_microphone_packet_before_greeting(self):
         audio = DummyAudio()
         session = GPTLiveSession(Settings(api_key="test-key"), audio)

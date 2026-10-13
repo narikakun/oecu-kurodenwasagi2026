@@ -486,14 +486,21 @@ class GPTLiveSession:
         loop = asyncio.get_running_loop()
         while self._next_audio_send_time > loop.time():
             await asyncio.sleep(self._next_audio_send_time - loop.time())
+        duration = len(pcm) / (self.settings.sample_rate * 2)
+        started = loop.time()
+        scheduled = self._next_audio_send_time
+        if started - scheduled > duration:
+            scheduled = started
+        # 送信開始時刻で予約し、送信処理時間を次の待ち時間に上乗せしない。
+        # 小さな待機誤差は吸収するが、追いつく速度は最大1.1倍に抑える。
+        self._next_audio_send_time = max(
+            scheduled + duration, started + duration / 1.1
+        )
         await self._send_event(
             {
                 "type": "session.input_audio.append",
                 "audio": base64.b64encode(pcm).decode("ascii"),
             }
-        )
-        self._next_audio_send_time = (
-            loop.time() + len(pcm) / (self.settings.sample_rate * 2)
         )
 
     async def _send_audio_loop(self) -> None:
