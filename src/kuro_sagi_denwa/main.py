@@ -7,6 +7,7 @@ import logging
 import os
 
 from .audio import AudienceOutput, AudioDevice, AudioDeviceSelector, BellRinger
+from .archive import TranscriptArchive
 from .config import Settings, load_env_file
 from .controller import PhoneController
 from .display import DisplayServer
@@ -32,7 +33,13 @@ async def run() -> None:
     device_selector.remember_current_names()
     device_selector.show_current()
     display.reset()
-    session = GPTLiveSession(settings, audio, display)
+    archive = TranscriptArchive(
+        settings.transcript_api_url,
+        settings.transcript_api_token,
+        settings.transcript_device_name,
+    )
+    archive.start()
+    session = GPTLiveSession(settings, audio, display, archive)
     controller = PhoneController(session, ringer, device_selector, display)
 
     # GPIOの監視は会話制御とは別タスクで回し続け、
@@ -62,6 +69,7 @@ async def run() -> None:
         await controller.close()
         await ringer.stop()
         await session.stop()
+        await archive.stop()
         await display.stop()
         hardware.close()
 

@@ -1,0 +1,7 @@
+Options -Indexes
+SetEnvIf Authorization "(.*)" HTTP_AUTHORIZATION=$1
+
+<FilesMatch "^(config\.php|config\.example\.php|bootstrap\.php|schema\.sql|README\.md)$">
+    Require all denied
+</FilesMatch>
+

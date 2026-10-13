@@ -37,6 +37,9 @@ class LoadEnvFileTest(unittest.TestCase):
             "AUDIENCE_VOLUME": "0.5",
             "DISPLAY_KIOSK": "false",
             "DISPLAY_KIOSK_BROWSER": "/usr/bin/chromium",
+            "TRANSCRIPT_API_URL": "https://example.com/ingest.php",
+            "TRANSCRIPT_API_TOKEN": "test-token",
+            "TRANSCRIPT_DEVICE_NAME": "phone-1",
         }
         with patch.dict(os.environ, values, clear=True):
             settings = Settings.from_env()
@@ -54,6 +57,9 @@ class LoadEnvFileTest(unittest.TestCase):
         self.assertEqual(settings.audience_volume, 0.5)
         self.assertFalse(settings.display_kiosk)
         self.assertEqual(settings.display_kiosk_browser, "/usr/bin/chromium")
+        self.assertEqual(settings.transcript_api_url, "https://example.com/ingest.php")
+        self.assertEqual(settings.transcript_api_token, "test-token")
+        self.assertEqual(settings.transcript_device_name, "phone-1")
 
     def test_kiosk_is_enabled_by_default(self):
         with patch.dict(os.environ, {"OPENAI_API_KEY": "test-secret"}, clear=True):
@@ -74,6 +80,15 @@ class LoadEnvFileTest(unittest.TestCase):
 
     def test_missing_file_is_not_an_error(self):
         self.assertFalse(load_env_file("/path/that/does/not/exist/.env"))
+
+    def test_transcript_url_and_token_must_be_configured_together(self):
+        settings = Settings(
+            api_key="test-secret",
+            transcript_api_url="https://example.com/ingest.php",
+        )
+
+        with self.assertRaisesRegex(ValueError, "両方設定"):
+            settings.validate()
 
 
 if __name__ == "__main__":

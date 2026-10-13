@@ -126,11 +126,13 @@ class PhoneController:
         self._display_state("ring_scheduled", f"{delay_seconds}秒後に呼び出します")
 
     async def _ring_after_delay(self, delay_seconds: int) -> None:
+        # ダイヤル後の待ち時間を接続準備にも使い、受話器を上げてからの待ち時間を減らす。
+        prepare_task = asyncio.create_task(self.session.prepare())
         try:
             await asyncio.sleep(delay_seconds)
             if not self._hook_up and self.ringer is not None:
                 try:
-                    await self.session.prepare()
+                    await prepare_task
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -142,6 +144,9 @@ class PhoneController:
         except asyncio.CancelledError:
             return
         finally:
+            if not prepare_task.done():
+                prepare_task.cancel()
+            await asyncio.gather(prepare_task, return_exceptions=True)
             if self._ring_delay_task is asyncio.current_task():
                 self._ring_delay_task = None
 
