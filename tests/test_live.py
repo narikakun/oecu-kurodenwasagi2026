@@ -152,7 +152,14 @@ class GPTLiveSessionTest(unittest.TestCase):
         self.assertIn("一度の発話は原則1〜2文", event["session"]["instructions"])
         self.assertIn("質問は1つだけ", event["session"]["instructions"])
         self.assertIn("毎回質問で返さない", event["session"]["instructions"])
-        self.assertIn("相手が話し始めたら発話を止め", event["session"]["instructions"])
+        self.assertIn(
+            "受話器越しの相手があなたに話しかけたときだけ",
+            event["session"]["instructions"],
+        )
+        self.assertIn(
+            "あなたへ向けられていない音声は割り込みとして扱わず",
+            event["session"]["instructions"],
+        )
         self.assertIn("明るい声", event["session"]["instructions"])
         self.assertIn("守口市役所", event["session"]["instructions"])
         self.assertIn("22,560円", event["session"]["instructions"])
