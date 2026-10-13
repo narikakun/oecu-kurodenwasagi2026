@@ -521,6 +521,53 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
         )
         await asyncio.wait_for(audio.input_queue.join(), timeout=0.1)
 
+    async def test_audio_packets_are_paced_by_pcm_duration_without_catchup(self):
+        session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio())
+        session.websocket = FakeWebSocket()
+        now = 100.0
+        send_times = []
+
+        async def sleep(delay):
+            nonlocal now
+            now += delay
+
+        async def send(event):
+            send_times.append(now)
+
+        session._send_event = send
+        clock = SimpleNamespace(time=lambda: now)
+        # 20 ms、100 msのパケットを混ぜ、長い停止後も連続送信しない。
+        with patch("kuro_sagi_denwa.live.asyncio.get_running_loop", return_value=clock), \
+             patch("kuro_sagi_denwa.live.asyncio.sleep", side_effect=sleep):
+            await session._send_audio_packet(bytes(960))
+            await session._send_audio_packet(bytes(4800))
+            await session._send_audio_packet(bytes(960))
+            now += 10.0
+            await session._send_audio_packet(bytes(960))
+            await session._send_audio_packet(bytes(960))
+
+        self.assertAlmostEqual(send_times[1] - send_times[0], 0.02)
+        self.assertAlmostEqual(send_times[2] - send_times[1], 0.1)
+        self.assertAlmostEqual(send_times[4] - send_times[3], 0.02)
+
+    async def test_input_audio_rate_limit_preserves_session_and_delays_sending(self):
+        audio = DummyAudio()
+        session = GPTLiveSession(Settings(api_key="test-key"), audio)
+        session.websocket = FakeWebSocket()
+        clock = SimpleNamespace(time=lambda: 100.0)
+        with patch("kuro_sagi_denwa.live.asyncio.get_running_loop", return_value=clock):
+            closed = await session._handle_server_event({
+                "type": "error",
+                "error": {
+                    "code": "input_audio_rate_limit_exceeded",
+                    "message": "Input audio is arriving too quickly",
+                },
+            })
+        self.assertFalse(closed)
+        self.assertTrue(session.is_running)
+        self.assertEqual(audio.clear_count, 1)
+        self.assertEqual(session._next_audio_send_time, 101.0)
+
     async def test_sends_first_microphone_packet_before_greeting(self):
         audio = DummyAudio()
         session = GPTLiveSession(Settings(api_key="test-key"), audio)
