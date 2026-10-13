@@ -352,6 +352,15 @@ class GPTLiveSession:
             logger.info("詐欺電話終了の効果音を再生します")
             await self.audio.play_audio_file(self.DISCONNECT_AUDIO_PATH)
             self.audio.clear_input_queue()
+            if self.display is not None:
+                self.display.publish(
+                    {
+                        "type": "feedback",
+                        "active": True,
+                        "image": "refund-fraud-warning.png",
+                        "alt": "還付金詐欺にご用心！",
+                    }
+                )
             await self._send_event(
                 {
                     "type": "session.instructions.append",

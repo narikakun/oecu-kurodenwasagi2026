@@ -251,7 +251,8 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_disconnect_sound_plays_once_before_feedback_resumes(self):
         audio = DummyAudio()
-        session = GPTLiveSession(Settings(api_key="test-key"), audio)
+        display = FakeDisplay()
+        session = GPTLiveSession(Settings(api_key="test-key"), audio, display)
         session.websocket = FakeWebSocket()
 
         session._log_transcript(
@@ -266,6 +267,16 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             audio.played_files,
             [(session.DISCONNECT_AUDIO_PATH, 1.0)],
+        )
+        self.assertEqual(display.events[0]["type"], "transcript")
+        self.assertEqual(
+            display.events[-1],
+            {
+                "type": "feedback",
+                "active": True,
+                "image": "refund-fraud-warning.png",
+                "alt": "還付金詐欺にご用心！",
+            },
         )
         self.assertEqual(
             session.websocket.sent,
