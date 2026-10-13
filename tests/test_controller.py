@@ -45,6 +45,7 @@ class FakeRinger:
         self.start_count = 0
         self.stop_count = 0
         self.has_output = output_available
+        self.stopped = asyncio.Event()
 
     @property
     def is_ringing(self):
@@ -55,6 +56,9 @@ class FakeRinger:
 
     async def start(self):
         self.start_count += 1
+
+    async def wait_until_stopped(self):
+        await self.stopped.wait()
 
     async def stop(self):
         self.stop_count += 1
@@ -163,6 +167,30 @@ class PhoneControllerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(display.events[0]["title"], "音声設定")
         self.assertEqual(display.events[0]["subtitle"], "読み込み中…")
         self.assertEqual(display.events[-1]["state"], "settings")
+
+    async def test_bell_playback_failure_opens_settings_and_stops_prepared_session(self):
+        class FailingRinger(FakeRinger):
+            async def wait_until_stopped(self):
+                raise ValueError("Sample format not supported")
+
+        for ringer in (FailingRinger(), FakeRinger()):
+            with self.subTest(ringer=type(ringer).__name__):
+                session = FakeSession()
+                selector = FakeDeviceSelector()
+                display = FakeDisplay()
+                controller = PhoneController(session, ringer, selector, display)
+                await controller.handle(HardwareEvent(HardwareEventType.DIAL, 0))
+                await controller._ring_delay_task
+                watch_task = controller._ring_watch_task
+                ringer.stopped.set()
+                await asyncio.wait_for(watch_task, timeout=1)
+
+                self.assertTrue(selector.active)
+                self.assertEqual(selector.enter_count, 1)
+                self.assertFalse(session.is_running)
+                self.assertEqual(session.stop_count, 1)
+                self.assertEqual(display.events[-1]["state"], "settings")
+                await controller.close()
 
     async def test_prepares_live_session_during_ring_delay(self):
         session = FakeSession()

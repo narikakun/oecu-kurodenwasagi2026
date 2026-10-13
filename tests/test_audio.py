@@ -112,6 +112,31 @@ class AudioDeviceTest(unittest.TestCase):
             ringer = BellRinger(Settings(api_key="test", bell_output_device=2))
             self.assertFalse(ringer.output_available())
 
+    def test_unsupported_bell_sample_format_is_unavailable(self):
+        fake_sd = SimpleNamespace(
+            query_devices=Mock(return_value={
+                "max_output_channels": 2, "default_samplerate": 44_100,
+            }),
+            check_output_settings=Mock(
+                side_effect=ValueError("Sample format not supported")
+            ),
+        )
+        with patch.dict(sys.modules, {"sounddevice": fake_sd}):
+            ringer = BellRinger(Settings(api_key="test"))
+            self.assertFalse(ringer.output_available())
+        self.assertEqual(fake_sd.check_output_settings.call_count, 2)
+
+    def test_bell_output_supporting_default_rate_is_available(self):
+        fake_sd = SimpleNamespace(
+            query_devices=Mock(return_value={
+                "max_output_channels": 2, "default_samplerate": 44_100,
+            }),
+            check_output_settings=Mock(side_effect=[ValueError("unsupported"), None]),
+        )
+        with patch.dict(sys.modules, {"sounddevice": fake_sd}):
+            ringer = BellRinger(Settings(api_key="test"))
+            self.assertTrue(ringer.output_available())
+
     def test_device_selector_changes_each_runtime_device(self):
         settings = Settings(api_key="test")
         audio = AudioDevice(settings)
@@ -371,6 +396,19 @@ class AudioDeviceTest(unittest.TestCase):
 
 
 class BellRingerStreamTest(unittest.IsolatedAsyncioTestCase):
+    async def test_stream_open_failure_reaches_playback_watcher(self):
+        fake_sd = SimpleNamespace(
+            RawOutputStream=Mock(side_effect=ValueError("Sample format not supported"))
+        )
+        with patch.dict(sys.modules, {
+            "sounddevice": fake_sd, "miniaudio": SimpleNamespace(),
+        }):
+            ringer = BellRinger(Settings(api_key="test"))
+            await ringer.start()
+            with self.assertRaisesRegex(RuntimeError, "ベル用出力を使用できません"):
+                await asyncio.wait_for(ringer.wait_until_stopped(), timeout=1)
+            await ringer.stop()
+
     async def test_stream_is_stopped_on_the_same_thread_after_write(self):
         import sys
         import threading

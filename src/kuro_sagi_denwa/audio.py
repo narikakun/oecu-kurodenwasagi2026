@@ -274,7 +274,10 @@ class BellRinger:
             return False
         try:
             info = sd.query_devices(device, kind="output")
-            return int(info.get("max_output_channels", 0)) > 0
+            if int(info.get("max_output_channels", 0)) <= 0:
+                return False
+            _supported_sample_rate(sd, device, "output", self.sample_rate)
+            return True
         except Exception as error:
             logger.warning("ベル用出力を確認できません: %s", error)
             return False
@@ -283,6 +286,11 @@ class BellRinger:
         await self.stop()
         self._task = asyncio.create_task(self._ring_loop())
         self._task.add_done_callback(self._report_failure)
+
+    async def wait_until_stopped(self) -> None:
+        """再生終了や出力障害をコントローラーに伝える。"""
+        if self._task is not None:
+            await asyncio.shield(self._task)
 
     @staticmethod
     def _report_failure(task: asyncio.Task[None]) -> None:
@@ -333,6 +341,9 @@ class BellRinger:
                 )
             except Exception as error:
                 logger.warning("ベル用出力を使用できません: %s", error)
+                raise RuntimeError("ベル用出力を使用できません") from error
+        if stream is None:
+            raise RuntimeError("ベル用出力が見つかりません")
         audience_stream = None
         if self.audience is not None and audience_device is not None:
             try:
@@ -409,8 +420,7 @@ class BellRinger:
                         stream.start()
                     except Exception as error:
                         logger.warning("ベル用出力を開始できません: %s", error)
-                        close_stream(stream)
-                        stream = None
+                        raise RuntimeError("ベル用出力を開始できません") from error
                 if audience_stream is not None:
                     try:
                         audience_stream.start()
@@ -435,8 +445,7 @@ class BellRinger:
                                 )
                             except Exception as error:
                                 logger.warning("ベル用出力が切断されました: %s", error)
-                                close_stream(stream)
-                                stream = None
+                                raise RuntimeError("ベル用出力が切断されました") from error
                         if audience_stream is not None and audience_pcm is not None:
                             audience_offset = block_index * audience_bytes_per_block
                             try:

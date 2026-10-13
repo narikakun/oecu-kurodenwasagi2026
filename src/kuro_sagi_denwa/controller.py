@@ -36,6 +36,8 @@ class Ringer(Protocol):
 
     async def start(self) -> None: ...
 
+    async def wait_until_stopped(self) -> None: ...
+
     async def stop(self) -> None: ...
 
 
@@ -73,6 +75,7 @@ class PhoneController:
         self.last_digit: int | None = None
         self._hook_up = False
         self._ring_delay_task: asyncio.Task[None] | None = None
+        self._ring_watch_task: asyncio.Task[None] | None = None
         self._start_task: asyncio.Task[None] | None = None
 
     async def handle(self, event) -> None:
@@ -160,6 +163,7 @@ class PhoneController:
                     )
                 await self.ringer.start()
                 self._display_state("ringing", "呼び出し中")
+                self._ring_watch_task = asyncio.create_task(self._watch_ring())
         except asyncio.CancelledError:
             return
         finally:
@@ -169,7 +173,23 @@ class PhoneController:
             if self._ring_delay_task is asyncio.current_task():
                 self._ring_delay_task = None
 
+    async def _watch_ring(self) -> None:
+        try:
+            if self.ringer is not None:
+                await self.ringer.wait_until_stopped()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception("ベル音の再生が停止したため音声設定を開きます")
+        if not self._hook_up:
+            await self._enter_device_settings()
+
     async def _cancel_ring(self) -> None:
+        watch_task = self._ring_watch_task
+        self._ring_watch_task = None
+        if watch_task is not None and watch_task is not asyncio.current_task():
+            watch_task.cancel()
+            await asyncio.gather(watch_task, return_exceptions=True)
         if self._ring_delay_task is not None:
             self._ring_delay_task.cancel()
             await asyncio.gather(self._ring_delay_task, return_exceptions=True)
