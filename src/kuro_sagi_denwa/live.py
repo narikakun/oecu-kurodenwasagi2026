@@ -7,6 +7,8 @@ import base64
 import json
 import logging
 import re
+import wave
+from pathlib import Path
 from typing import Any
 
 from .archive import TranscriptArchive
@@ -84,6 +86,9 @@ class GPTLiveSession:
     """1接続だけを使い、受話器とGPT-Liveの音声をそのまま中継する。"""
 
     URL = "wss://api.openai.com/v1/live/sessions"
+    GREETING_AUDIO_PATH = (
+        Path(__file__).parent / "assets" / "audio" / "moshimoshi-meridian.wav"
+    )
     DEFAULT_INSTRUCTIONS = (
         "実際の電話のように、日本語で自然に会話してください。"
         "一度の発話は原則1〜2文にし、一度に複数の質問をせず、質問は1つだけにしてください。"
@@ -102,10 +107,6 @@ class GPTLiveSession:
         "『保険年金課』を『ほけんねんきんか』、『還付金』を『かんぷきん』、"
         "『医療費』を『いりょうひ』、『ATM』を『エーティーエム』と読んでください。"
         "『22,560円』は『にまんにせんごひゃくろくじゅうえん』と読んでください。"
-    )
-    GREETING_INSTRUCTION = (
-        "相手の発言を待たず、今すぐあなたから先に日本語で「もしもし？」とだけ言ってください。"
-        "ほかの言葉は加えず、言い終えたら相手の返事を待ってください。"
     )
     CONTROL_ACK_TIMEOUT_SECONDS = 15
     FIRST_AUDIO_TIMEOUT_SECONDS = 1
@@ -181,10 +182,10 @@ class GPTLiveSession:
             await self.prepare()
             await self.audio.start()
 
-            # 受話器を上げた時点で挨拶を1回だけ指示し、その後にマイク音声を送る。
+            # 録音済みの挨拶を確実に再生してから、マイク音声の送信を始める。
             self.audio.clear_input_queue()
-            await self._send_event(self._greeting_event())
-            logger.info("GPT-Liveへ最初の「もしもし？」を指示しました")
+            await self._play_recorded_greeting()
+            self.audio.clear_input_queue()
             await self._send_first_audio_packet()
             self._sender_task = asyncio.create_task(self._send_audio_loop())
             self._sender_task.add_done_callback(self._report_sender_failure)
@@ -240,13 +241,37 @@ class GPTLiveSession:
             },
         }
 
-    def _greeting_event(self) -> dict[str, Any]:
-        return {
-            "type": "session.instructions.append",
-            "event_id": "initial_greeting",
-            "delegation_id": None,
-            "content": self.GREETING_INSTRUCTION,
-        }
+    @classmethod
+    def _load_recorded_greeting(cls) -> bytes:
+        with wave.open(str(cls.GREETING_AUDIO_PATH), "rb") as greeting:
+            if (
+                greeting.getnchannels() != 1
+                or greeting.getsampwidth() != 2
+                or greeting.getframerate() != 24_000
+            ):
+                raise RuntimeError(
+                    "録音済みの「もしもし？」は24kHz・モノラル・PCM16である必要があります"
+                )
+            return greeting.readframes(greeting.getnframes())
+
+    async def _play_recorded_greeting(self) -> None:
+        pcm = await asyncio.to_thread(self._load_recorded_greeting)
+        await self.audio.play(pcm)
+        await self.audio.wait_until_played()
+        greeting_text = "もしもし？"
+        transcript_logger.info("AI: %s", greeting_text)
+        if self.archive is not None:
+            self.archive.record_transcript("assistant", greeting_text)
+        if self.display is not None:
+            self.display.publish(
+                {
+                    "type": "transcript",
+                    "speaker": "assistant",
+                    "status": "final",
+                    "text": greeting_text,
+                }
+            )
+        logger.info("録音済みの最初の「もしもし？」を再生しました")
 
     async def _send_event(self, event: dict[str, Any]) -> None:
         assert self.websocket is not None

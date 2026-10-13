@@ -41,6 +41,7 @@ htmlcov/
 *.wav
 *.pcm
 *.raw
+!src/kuro_sagi_denwa/assets/audio/moshimoshi-meridian.wav
 
 # エディタ・OS生成物
 .DS_Store

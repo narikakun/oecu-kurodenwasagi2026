@@ -18,6 +18,7 @@ class DummyAudio:
     def __init__(self):
         self.input_queue = asyncio.Queue()
         self.played = []
+        self.wait_count = 0
         self.clear_count = 0
         self.start_count = 0
         self.stop_count = 0
@@ -30,6 +31,9 @@ class DummyAudio:
 
     async def play(self, data):
         self.played.append(data)
+
+    async def wait_until_played(self):
+        self.wait_count += 1
 
     def clear_input_queue(self):
         self.clear_count += 1
@@ -191,15 +195,13 @@ class GPTLiveSessionTest(unittest.TestCase):
         self.assertIn("2回目の日付", second["session"]["instructions"])
         self.assertEqual(build_scenario.call_count, 2)
 
-    def test_greeting_is_only_moshimoshi(self):
+    def test_recorded_greeting_is_24khz_mono_pcm16(self):
         session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio())
 
-        event = session._greeting_event()
+        pcm = session._load_recorded_greeting()
 
-        self.assertEqual(event["type"], "session.instructions.append")
-        self.assertIsNone(event["delegation_id"])
-        self.assertIn("今すぐあなたから先に", event["content"])
-        self.assertIn("「もしもし？」とだけ", event["content"])
+        self.assertGreater(len(pcm), 0)
+        self.assertEqual(len(pcm) % 2, 0)
 
 
 class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
@@ -218,6 +220,30 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(display.events[0]["text"], "金額は20000")
         self.assertEqual(display.events[1]["text"], "金額は22560円です。")
         self.assertEqual(display.events[-1]["text"], "金額は22560円です。")
+
+    async def test_recorded_greeting_is_displayed_and_archived(self):
+        audio = DummyAudio()
+        display = FakeDisplay()
+        archive = FakeArchive()
+        session = GPTLiveSession(
+            Settings(api_key="test-key"), audio, display, archive
+        )
+
+        await session._play_recorded_greeting()
+
+        self.assertEqual(audio.wait_count, 1)
+        self.assertEqual(archive.transcripts, [("assistant", "もしもし？")])
+        self.assertEqual(
+            display.events,
+            [
+                {
+                    "type": "transcript",
+                    "speaker": "assistant",
+                    "status": "final",
+                    "text": "もしもし？",
+                }
+            ],
+        )
 
     async def test_assistant_caption_restores_official_moriguchi_spelling(self):
         display = FakeDisplay()
@@ -267,12 +293,8 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("GPT-Liveセッションへ接続します", logs.output[0])
         self.assertIn("GPT-Liveセッションを開始しました", "\n".join(logs.output))
         self.assertNotIn("もしもし", "\n".join(logs.output))
-        self.assertEqual(
-            sum(
-                event["type"] == "session.instructions.append"
-                for event in websocket.sent
-            ),
-            0,
+        self.assertFalse(
+            any(event["type"] == "session.instructions.append" for event in websocket.sent)
         )
         fake_websockets.connect.assert_awaited_once()
         self.assertFalse(
@@ -280,7 +302,7 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(session._prepared)
 
-    async def test_sends_greeting_once_before_first_microphone_audio(self):
+    async def test_plays_recorded_greeting_before_first_microphone_audio(self):
         audio = DummyAudio()
         await audio.input_queue.put(b"first pcm")
         session = GPTLiveSession(Settings(api_key="test-key"), audio)
@@ -289,8 +311,15 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
 
         await session.start()
 
-        self.assertEqual(session.websocket.sent[0], session._greeting_event())
-        self.assertEqual(session.websocket.sent[1]["type"], "session.input_audio.append")
+        self.assertEqual(audio.played, [session._load_recorded_greeting()])
+        self.assertEqual(audio.wait_count, 1)
+        self.assertEqual(session.websocket.sent[0]["type"], "session.input_audio.append")
+        self.assertFalse(
+            any(
+                event["type"] == "session.instructions.append"
+                for event in session.websocket.sent
+            )
+        )
         self.assertTrue(session.is_conversation_active)
         await session._abort_start()
 
