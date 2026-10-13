@@ -109,6 +109,7 @@ class GPTLiveSession:
     )
     GREETING_TIMEOUT_SECONDS = 3
     CONTROL_ACK_TIMEOUT_SECONDS = 15
+    FIRST_AUDIO_TIMEOUT_SECONDS = 1
     TRANSCRIPT_IDLE_SECONDS = 1.0
     TRANSCRIPT_SENTENCE_SECONDS = 0.15
 
@@ -192,6 +193,7 @@ class GPTLiveSession:
                 "session.input_audio.unmuted", "handset_up_unmute"
             )
             logger.info("GPT-Liveの入力ミュート解除を確認しました")
+            await self._send_first_audio_packet()
             self._sender_task = asyncio.create_task(self._send_audio_loop())
             self._sender_task.add_done_callback(self._report_sender_failure)
             await self._send_event(self._greeting_event())
@@ -445,11 +447,17 @@ class GPTLiveSession:
                 if retried:
                     raise RuntimeError(
                         "GPT-Liveから初回挨拶「もしもし？」が返りませんでした"
+                        f"（指示受理={instruction_accepted}、音声={audio_received}、"
+                        f"文字起こし={bool(greeting_transcript)}）"
                     )
                 retry_event_id = "initial_greeting_retry"
                 greeting_event_ids.add(retry_event_id)
                 logger.warning(
                     "GPT-Liveの初回挨拶が届かないため、挨拶を再送します"
+                    "（指示受理=%s、音声=%s、文字起こし=%s）",
+                    instruction_accepted,
+                    audio_received,
+                    bool(greeting_transcript),
                 )
                 await self._send_event(self._greeting_event(retry_event_id))
                 retried = True
@@ -473,17 +481,37 @@ class GPTLiveSession:
         await self.audio.wait_until_played()
         logger.info("GPT-Liveの初回挨拶を確認しました: %s", greeting_transcript)
 
+    async def _send_first_audio_packet(self) -> None:
+        """挨拶指示より前に入力タイムラインが動いていることを保証する。"""
+        try:
+            pcm = await asyncio.wait_for(
+                self.audio.input_queue.get(),
+                timeout=self.FIRST_AUDIO_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError as error:
+            raise RuntimeError(
+                "USB受話器から最初の音声データが届きませんでした"
+            ) from error
+        try:
+            await self._send_audio_packet(pcm)
+        finally:
+            self.audio.input_queue.task_done()
+        logger.info("GPT-Liveへの入力音声送信を開始しました")
+
+    async def _send_audio_packet(self, pcm: bytes) -> None:
+        await self._send_event(
+            {
+                "type": "session.input_audio.append",
+                "audio": base64.b64encode(pcm).decode("ascii"),
+            }
+        )
+
     async def _send_audio_loop(self) -> None:
         assert self.websocket is not None
         while True:
             pcm = await self.audio.input_queue.get()
             try:
-                await self._send_event(
-                    {
-                        "type": "session.input_audio.append",
-                        "audio": base64.b64encode(pcm).decode("ascii"),
-                    }
-                )
+                await self._send_audio_packet(pcm)
             finally:
                 self.audio.input_queue.task_done()
 

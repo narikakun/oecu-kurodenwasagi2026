@@ -555,6 +555,29 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
         )
         await asyncio.wait_for(audio.input_queue.join(), timeout=0.1)
 
+    async def test_sends_first_microphone_packet_before_greeting(self):
+        audio = DummyAudio()
+        session = GPTLiveSession(Settings(api_key="test-key"), audio)
+        session.websocket = FakeWebSocket()
+        await audio.input_queue.put(b"first pcm")
+
+        await session._send_first_audio_packet()
+
+        self.assertEqual(session.websocket.sent[0]["type"], "session.input_audio.append")
+        self.assertEqual(
+            session.websocket.sent[0]["audio"],
+            base64.b64encode(b"first pcm").decode("ascii"),
+        )
+        await asyncio.wait_for(audio.input_queue.join(), timeout=0.1)
+
+    async def test_first_microphone_packet_has_timeout(self):
+        session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio())
+        session.websocket = FakeWebSocket()
+        session.FIRST_AUDIO_TIMEOUT_SECONDS = 0.01
+
+        with self.assertRaisesRegex(RuntimeError, "最初の音声データ"):
+            await session._send_first_audio_packet()
+
     async def test_dial_is_ignored(self):
         session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio())
         session.websocket = FakeWebSocket()

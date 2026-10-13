@@ -1000,6 +1000,7 @@ class AudioDevice:
                 # 遅延が積み上がるより、古い音声を捨てて現在へ追いつく方を優先する。
                 try:
                     self.input_queue.get_nowait()
+                    self.input_queue.task_done()
                 except asyncio.QueueEmpty:
                     pass
             self.input_queue.put_nowait(data)
@@ -1163,6 +1164,7 @@ class AudioDevice:
         """担当切替前に録音された古い音声を、新しい担当へ送らないよう捨てる。"""
         while not self.input_queue.empty():
             self.input_queue.get_nowait()
+            self.input_queue.task_done()
 
     async def play_busy_tone(self, repeats: int = 3) -> None:
         """相手側から切られたことを示す「プー、プー」音を再生する。"""
@@ -1263,4 +1265,5 @@ class AudioDevice:
 
         while not self.input_queue.empty():
             self.input_queue.get_nowait()
+            self.input_queue.task_done()
         logger.info("USB受話器を停止しました")
