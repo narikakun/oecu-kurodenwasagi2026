@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from kuro_sagi_denwa.audio import (
     AudienceOutput,
@@ -58,6 +58,59 @@ class AudioDeviceTest(unittest.TestCase):
 
         self.assertEqual(ringer.path.name, "Rotary_Phone-Ringtone01-1.mp3")
         self.assertTrue(ringer.path.is_file())
+
+    def test_bell_output_availability_uses_current_device(self):
+        fake_sd = SimpleNamespace(
+            query_devices=lambda device=None, kind=None: {
+                "name": "bell",
+                "max_output_channels": 2,
+            }
+        )
+        with patch.dict(sys.modules, {"sounddevice": fake_sd}):
+            ringer = BellRinger(Settings(api_key="test", bell_output_device=2))
+            self.assertTrue(ringer.output_available())
+
+    def test_missing_named_bell_output_is_unavailable(self):
+        class FakeSoundDevice:
+            @staticmethod
+            def query_devices(device=None, kind=None):
+                if device is None and kind is None:
+                    return [{"name": "other", "max_output_channels": 1}]
+                raise ValueError("device not found")
+
+        with patch.dict(sys.modules, {"sounddevice": FakeSoundDevice}):
+            ringer = BellRinger(
+                Settings(api_key="test", bell_output_device="missing bell")
+            )
+            self.assertFalse(ringer.output_available())
+
+    def test_bell_output_availability_uses_default_output(self):
+        query_devices = Mock(return_value={"max_output_channels": 2})
+        fake_sd = SimpleNamespace(query_devices=query_devices)
+        with patch.dict(sys.modules, {"sounddevice": fake_sd}):
+            ringer = BellRinger(Settings(api_key="test"))
+            self.assertTrue(ringer.output_available())
+        query_devices.assert_called_once_with(None, kind="output")
+
+    def test_missing_default_or_selected_bell_output_is_unavailable(self):
+        for device in (None, 2):
+            with self.subTest(device=device):
+                fake_sd = SimpleNamespace(
+                    query_devices=Mock(side_effect=ValueError("device not found"))
+                )
+                with patch.dict(sys.modules, {"sounddevice": fake_sd}):
+                    ringer = BellRinger(
+                        Settings(api_key="test", bell_output_device=device)
+                    )
+                    self.assertFalse(ringer.output_available())
+
+    def test_bell_device_without_output_channels_is_unavailable(self):
+        fake_sd = SimpleNamespace(
+            query_devices=Mock(return_value={"max_output_channels": 0})
+        )
+        with patch.dict(sys.modules, {"sounddevice": fake_sd}):
+            ringer = BellRinger(Settings(api_key="test", bell_output_device=2))
+            self.assertFalse(ringer.output_available())
 
     def test_device_selector_changes_each_runtime_device(self):
         settings = Settings(api_key="test")

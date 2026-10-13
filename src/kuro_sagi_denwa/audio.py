@@ -265,6 +265,20 @@ class BellRinger:
     def is_ringing(self) -> bool:
         return self._task is not None and not self._task.done()
 
+    def output_available(self) -> bool:
+        """設定中のベル出力が現在も使用可能か確認する。"""
+        import sounddevice as sd
+
+        device = _resolve_device(sd, self.output_device, self.device_name, "output")
+        if self.device_name is not None and device is None:
+            return False
+        try:
+            info = sd.query_devices(device, kind="output")
+            return int(info.get("max_output_channels", 0)) > 0
+        except Exception as error:
+            logger.warning("ベル用出力を確認できません: %s", error)
+            return False
+
     async def start(self) -> None:
         await self.stop()
         self._task = asyncio.create_task(self._ring_loop())
