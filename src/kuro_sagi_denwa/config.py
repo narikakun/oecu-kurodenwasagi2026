@@ -93,6 +93,9 @@ class Settings:
     dial_skip_first_pulse: bool = True
     digit_timeout_ms: int = 150
     mock_gpio: bool = False
+    transcript_api_url: str = ""
+    transcript_api_token: str = ""
+    transcript_device_name: str = "black-phone"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -138,6 +141,11 @@ class Settings:
             ),
             dial_skip_first_pulse=_bool_env("DIAL_SKIP_FIRST_PULSE", True),
             mock_gpio=_bool_env("MOCK_GPIO", False),
+            transcript_api_url=os.getenv("TRANSCRIPT_API_URL", "").strip(),
+            transcript_api_token=os.getenv("TRANSCRIPT_API_TOKEN", "").strip(),
+            transcript_device_name=os.getenv(
+                "TRANSCRIPT_DEVICE_NAME", "black-phone"
+            ).strip(),
         )
 
     def validate(self) -> None:
@@ -160,3 +168,7 @@ class Settings:
         ):
             if not 0 <= volume <= 1:
                 raise ValueError(f"{name}は0から1の間で指定してください")
+        if bool(self.transcript_api_url) != bool(self.transcript_api_token):
+            raise ValueError(
+                "TRANSCRIPT_API_URLとTRANSCRIPT_API_TOKENは両方設定してください"
+            )

@@ -9,6 +9,7 @@ import logging
 import re
 from typing import Any
 
+from .archive import TranscriptArchive
 from .audio import AudioDevice
 from .config import Settings
 from .scenario import build_refund_fraud_scenario
@@ -110,10 +111,17 @@ class GPTLiveSession:
     TRANSCRIPT_IDLE_SECONDS = 1.0
     TRANSCRIPT_SENTENCE_SECONDS = 0.15
 
-    def __init__(self, settings: Settings, audio: AudioDevice, display: Any = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        audio: AudioDevice,
+        display: Any = None,
+        archive: TranscriptArchive | None = None,
+    ) -> None:
         self.settings = settings
         self.audio = audio
         self.display = display
+        self.archive = archive
         self.websocket: Any = None
         self._sender_task: asyncio.Task[None] | None = None
         self._receiver_task: asyncio.Task[None] | None = None
@@ -166,6 +174,8 @@ class GPTLiveSession:
         if self.is_conversation_active:
             return
 
+        if self.archive is not None:
+            self.archive.begin_call()
         try:
             await self.prepare()
             await self.audio.start()
@@ -188,9 +198,16 @@ class GPTLiveSession:
             self._receiver_task = asyncio.create_task(self._receive_loop())
             self._receiver_task.add_done_callback(self._report_receiver_failure)
             logger.info("GPT-Liveの通話を開始しました")
-        except (Exception, asyncio.CancelledError):
+        except asyncio.CancelledError:
             # 挨拶中に受話器を置かれた場合も、送信タスクや接続を残さない。
             await self._abort_start()
+            if self.archive is not None:
+                self.archive.end_call("cancelled")
+            raise
+        except Exception:
+            await self._abort_start()
+            if self.archive is not None:
+                self.archive.end_call("error")
             raise
 
     def _session_start_event(self) -> dict[str, Any]:
@@ -302,6 +319,10 @@ class GPTLiveSession:
                 text, assistant=label == "AI"
             )
             transcript_logger.info("%s: %s", label, normalized_text)
+            if self.archive is not None:
+                self.archive.record_transcript(
+                    "assistant" if label == "AI" else "user", normalized_text
+                )
             if self.display is not None:
                 self.display.publish(
                     {
@@ -509,3 +530,5 @@ class GPTLiveSession:
         await self.audio.stop()
         if was_running:
             logger.info("GPT-Liveセッションを終了しました")
+        if self.archive is not None:
+            self.archive.end_call("completed")

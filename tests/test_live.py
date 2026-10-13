@@ -66,6 +66,14 @@ class FakeDisplay:
         self.events.append(event)
 
 
+class FakeArchive:
+    def __init__(self):
+        self.transcripts = []
+
+    def record_transcript(self, speaker, text):
+        self.transcripts.append((speaker, text))
+
+
 class GPTLiveSessionTest(unittest.TestCase):
     def test_normalizes_transcript_numbers_to_half_width_digits(self):
         self.assertEqual(
@@ -219,6 +227,23 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(display.events[0]["text"], "守口市役所、保険年金課です。")
         self.assertEqual(display.events[-1]["text"], "守口市役所、保険年金課です。")
+
+    async def test_archives_only_final_normalized_transcript(self):
+        archive = FakeArchive()
+        session = GPTLiveSession(
+            Settings(api_key="test-key"), DummyAudio(), archive=archive
+        )
+
+        session._log_transcript(
+            {
+                "type": "session.output_transcript.delta",
+                "delta": "にまんにせんごひゃくろくじゅうえんです。",
+            }
+        )
+        self.assertEqual(archive.transcripts, [])
+        session._flush_all_transcripts()
+
+        self.assertEqual(archive.transcripts, [("assistant", "22560円です。")])
 
     async def test_prepare_logs_session_start(self):
         audio = DummyAudio()

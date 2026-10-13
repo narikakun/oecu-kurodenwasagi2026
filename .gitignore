@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+php/config.php
 
 # Python仮想環境
 .venv/
