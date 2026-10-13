@@ -27,6 +27,15 @@ _SMALL_NUMBER_UNITS = {"十": 10, "百": 100, "千": 1_000}
 _LARGE_NUMBER_UNITS = {"万": 10_000, "億": 100_000_000, "兆": 1_000_000_000_000}
 _KANJI_NUMBER_RE = re.compile(r"[0-9〇零一二三四五六七八九十百千万億兆]+")
 _FULL_WIDTH_DIGIT_TABLE = str.maketrans("０１２３４５６７８９", "0123456789")
+_TRANSCRIPT_TERM_REPLACEMENTS = {
+    "エーティーエム": "ATM",
+    "エー・ティー・エム": "ATM",
+    "えーてぃーえむ": "ATM",
+    "ＡＴＭ": "ATM",
+    "シャープ": "#",
+    "しゃーぷ": "#",
+    "＃": "#",
+}
 
 
 def normalize_transcript_numbers(text: str) -> str:
@@ -79,6 +88,8 @@ def normalize_transcript_for_display(text: str, *, assistant: bool) -> str:
         normalized = normalized.replace("もりぐち市役所", "守口市役所")
         normalized = normalized.replace("もりぐちしやくしょ", "守口市役所")
         normalized = normalized.replace("モリグチ市役所", "守口市役所")
+    for spoken, written in _TRANSCRIPT_TERM_REPLACEMENTS.items():
+        normalized = normalized.replace(spoken, written)
     return normalize_transcript_numbers(normalized)
 
 

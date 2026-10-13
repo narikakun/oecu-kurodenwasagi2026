@@ -130,6 +130,26 @@ class GPTLiveSessionTest(unittest.TestCase):
             spoken,
         )
 
+    def test_restores_spoken_symbols_and_initialism_for_captions(self):
+        spoken = "エーティーエムではなく、警察相談専用電話はシャープ９１１０です。"
+        expected = "ATMではなく、警察相談専用電話は#9110です。"
+
+        self.assertEqual(
+            normalize_transcript_for_display(spoken, assistant=True), expected
+        )
+        self.assertEqual(
+            normalize_transcript_for_display(spoken, assistant=False), expected
+        )
+
+    def test_normalizes_common_spelling_variants_in_captions(self):
+        self.assertEqual(
+            normalize_transcript_for_display(
+                "エー・ティー・エム、えーてぃーえむ、ＡＴＭ、しゃーぷ188",
+                assistant=True,
+            ),
+            "ATM、ATM、ATM、#188",
+        )
+
     def test_session_start_event_is_minimal_free_conversation(self):
         settings = Settings(
             api_key="test-key",
