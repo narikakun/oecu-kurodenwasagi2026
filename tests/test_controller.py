@@ -41,13 +41,17 @@ class FakeSession:
 
 
 class FakeRinger:
-    def __init__(self):
+    def __init__(self, output_available=True):
         self.start_count = 0
         self.stop_count = 0
+        self.has_output = output_available
 
     @property
     def is_ringing(self):
         return self.start_count > self.stop_count
+
+    def output_available(self):
+        return self.has_output
 
     async def start(self):
         self.start_count += 1
@@ -141,6 +145,24 @@ class PhoneControllerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ringer.start_count, 1)
         self.assertEqual(session.prepare_count, 1)
         self.assertEqual(session.start_count, 0)
+
+    async def test_missing_bell_output_opens_device_settings(self):
+        session = FakeSession()
+        ringer = FakeRinger(output_available=False)
+        selector = FakeDeviceSelector()
+        display = FakeDisplay()
+        controller = PhoneController(session, ringer, selector, display)
+
+        await controller.handle(HardwareEvent(HardwareEventType.DIAL, 3))
+
+        self.assertIsNone(controller._ring_delay_task)
+        self.assertEqual(session.prepare_count, 0)
+        self.assertEqual(ringer.start_count, 0)
+        self.assertEqual(selector.enter_count, 1)
+        self.assertTrue(selector.active)
+        self.assertEqual(display.events[0]["title"], "音声設定")
+        self.assertEqual(display.events[0]["subtitle"], "読み込み中…")
+        self.assertEqual(display.events[-1]["state"], "settings")
 
     async def test_prepares_live_session_during_ring_delay(self):
         session = FakeSession()

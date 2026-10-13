@@ -32,6 +32,8 @@ class Ringer(Protocol):
     @property
     def is_ringing(self) -> bool: ...
 
+    def output_available(self) -> bool: ...
+
     async def start(self) -> None: ...
 
     async def stop(self) -> None: ...
@@ -96,23 +98,40 @@ class PhoneController:
                 and (self.device_selector.active or self._ringer_is_ringing())
             ):
                 if not self.device_selector.active:
-                    self._display_settings_loading()
-                    # WebSocket配信へ制御を戻し、時間のかかる終了処理より先に表示する。
-                    await asyncio.sleep(0)
-                    await self._cancel_ring()
-                    if self.session.is_running:
-                        await self.session.stop()
-                    self.device_selector.enter()
-                    self._display_state("settings", "音声設定中")
+                    await self._enter_device_settings()
                 else:
                     self.device_selector.handle_digit(event.digit)
             elif event.digit is not None and not self._hook_up:
-                self._schedule_ring(event.digit)
+                if not self._ringer_output_available():
+                    logger.warning(
+                        "ベル用出力が見つからないため音声設定を開きます"
+                    )
+                    await self._enter_device_settings()
+                else:
+                    self._schedule_ring(event.digit)
             elif event.digit is not None and self.session.is_running:
                 await self.session.notify_dial(event.digit)
 
     def _ringer_is_ringing(self) -> bool:
         return self.ringer is not None and self.ringer.is_ringing
+
+    def _ringer_output_available(self) -> bool:
+        if self.ringer is None:
+            return False
+        return self.ringer.output_available()
+
+    async def _enter_device_settings(self) -> None:
+        if self.device_selector is None:
+            self._display_state("error", "ベル出力がありません")
+            return
+        self._display_settings_loading()
+        # WebSocket配信へ制御を戻し、時間のかかる終了処理より先に表示する。
+        await asyncio.sleep(0)
+        await self._cancel_ring()
+        if self.session.is_running:
+            await self.session.stop()
+        self.device_selector.enter()
+        self._display_state("settings", "音声設定中")
 
     def _schedule_ring(self, delay_seconds: int) -> None:
         if self.ringer is None:
