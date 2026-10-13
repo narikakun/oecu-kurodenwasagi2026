@@ -151,6 +151,7 @@ class GPTLiveSession:
         self._prepare_lock = asyncio.Lock()
         self._closed_event = asyncio.Event()
         self._prepared = False
+        self._next_audio_send_time = 0.0
         self._transcript_buffers: dict[str, str] = {}
         self._transcript_flush_handles: dict[str, asyncio.TimerHandle] = {}
 
@@ -176,6 +177,7 @@ class GPTLiveSession:
             logger.info("GPT-Liveセッションへ接続します")
             self._feedback_transition_started = False
             self._closed_event.clear()
+            self._next_audio_send_time = 0.0
             self.websocket = await websockets.connect(
                 self.URL,
                 additional_headers={"Authorization": f"Bearer {self.settings.api_key}"},
@@ -479,11 +481,19 @@ class GPTLiveSession:
         logger.info("GPT-Liveへの入力音声送信を開始しました")
 
     async def _send_audio_packet(self, pcm: bytes) -> None:
+        # キューに溜まった音声を一気に送らず、PCM16モノラルの実時間で送る。
+        # 遅延した時間を送信枠として貯めない（停止後の高速な追いつきを防ぐ）。
+        loop = asyncio.get_running_loop()
+        while self._next_audio_send_time > loop.time():
+            await asyncio.sleep(self._next_audio_send_time - loop.time())
         await self._send_event(
             {
                 "type": "session.input_audio.append",
                 "audio": base64.b64encode(pcm).decode("ascii"),
             }
+        )
+        self._next_audio_send_time = (
+            loop.time() + len(pcm) / (self.settings.sample_rate * 2)
         )
 
     async def _send_audio_loop(self) -> None:
@@ -528,6 +538,14 @@ class GPTLiveSession:
             error = event.get("error", {})
             message = error.get("message", "不明なエラー")
             code = error.get("code")
+            if code == "input_audio_rate_limit_exceeded":
+                logger.warning("入力音声の送信速度制限を検出しました: %s", message)
+                self.audio.clear_input_queue()
+                self._next_audio_send_time = max(
+                    self._next_audio_send_time,
+                    asyncio.get_running_loop().time() + 1.0,
+                )
+                return False
             if code:
                 raise RuntimeError(f"GPT-Liveエラー [{code}]: {message}")
             raise RuntimeError(f"GPT-Liveエラー: {message}")
