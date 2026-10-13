@@ -141,7 +141,7 @@ class GPTLiveSession:
         return self._receiver_task is not None
 
     async def prepare(self) -> None:
-        """呼び出し前に接続し、入力送信前に最初の挨拶を準備する。"""
+        """呼び出し前にGPT-Liveへの接続だけを準備する。"""
         async with self._prepare_lock:
             await self._prepare_locked()
 
@@ -160,10 +160,8 @@ class GPTLiveSession:
             )
             await self._send_event(self._session_start_event())
             await self._wait_until_started()
-            await self._send_event(self._greeting_event())
             self._prepared = True
             logger.info("GPT-Liveセッションを開始しました（音声入力開始前）")
-            logger.info("最初の「もしもし？」を先行準備します")
         except asyncio.CancelledError:
             logger.info("GPT-Liveセッションの開始を中止します")
             await self._abort_start()
@@ -183,9 +181,10 @@ class GPTLiveSession:
             await self.prepare()
             await self.audio.start()
 
-            # prepare中はマイク音声を送っていないため、サーバー側のミュートは不要。
-            # 受話器を上げた時点から入力を送り、先行生成済みの挨拶を受信する。
+            # 受話器を上げた時点で挨拶を1回だけ指示し、その後にマイク音声を送る。
             self.audio.clear_input_queue()
+            await self._send_event(self._greeting_event())
+            logger.info("GPT-Liveへ最初の「もしもし？」を指示しました")
             await self._send_first_audio_packet()
             self._sender_task = asyncio.create_task(self._send_audio_loop())
             self._sender_task.add_done_callback(self._report_sender_failure)

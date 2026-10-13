@@ -53,6 +53,12 @@ class FakeWebSocket:
     async def close(self):
         self.close_count += 1
 
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        await asyncio.Event().wait()
+
 
 class FakeDisplay:
     def __init__(self):
@@ -260,20 +266,33 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("GPT-Liveセッションへ接続します", logs.output[0])
         self.assertIn("GPT-Liveセッションを開始しました", "\n".join(logs.output))
-        self.assertIn("最初の「もしもし？」を先行準備", logs.output[-1])
-        self.assertEqual(websocket.sent[-1], session._greeting_event())
+        self.assertNotIn("もしもし", "\n".join(logs.output))
         self.assertEqual(
             sum(
                 event["type"] == "session.instructions.append"
                 for event in websocket.sent
             ),
-            1,
+            0,
         )
         fake_websockets.connect.assert_awaited_once()
         self.assertFalse(
             any(event["type"] == "session.input_audio.mute" for event in websocket.sent)
         )
         self.assertTrue(session._prepared)
+
+    async def test_sends_greeting_once_before_first_microphone_audio(self):
+        audio = DummyAudio()
+        await audio.input_queue.put(b"first pcm")
+        session = GPTLiveSession(Settings(api_key="test-key"), audio)
+        session.websocket = FakeWebSocket()
+        session._prepared = True
+
+        await session.start()
+
+        self.assertEqual(session.websocket.sent[0], session._greeting_event())
+        self.assertEqual(session.websocket.sent[1]["type"], "session.input_audio.append")
+        self.assertTrue(session.is_conversation_active)
+        await session._abort_start()
 
     async def test_stop_closes_prepared_session_without_receiver_loop(self):
         audio = DummyAudio()
