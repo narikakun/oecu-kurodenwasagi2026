@@ -89,6 +89,14 @@ class GPTLiveSession:
     GREETING_AUDIO_PATH = (
         Path(__file__).parent / "assets" / "audio" / "moshimoshi-meridian.wav"
     )
+    DISCONNECT_AUDIO_PATH = (
+        Path(__file__).parent / "assets" / "audio" / "call-disconnect.mp3"
+    )
+    FEEDBACK_TRIGGER_TEXT = "それでは失礼します"
+    FEEDBACK_RESUME_INSTRUCTION = (
+        "通話終了音の再生が完了しました。犯人役は完全に終了してください。"
+        "直前の相手の判断に対応する中立の振り返りを、予定していた内容で今すぐ始めてください。"
+    )
     DEFAULT_INSTRUCTIONS = (
         "実際の電話のように、日本語で自然に会話してください。"
         "一度の発話は原則1〜2文にし、一度に複数の質問をせず、質問は1つだけにしてください。"
@@ -127,6 +135,8 @@ class GPTLiveSession:
         self.websocket: Any = None
         self._sender_task: asyncio.Task[None] | None = None
         self._receiver_task: asyncio.Task[None] | None = None
+        self._feedback_transition_task: asyncio.Task[None] | None = None
+        self._feedback_transition_started = False
         self._prepare_lock = asyncio.Lock()
         self._closed_event = asyncio.Event()
         self._prepared = False
@@ -153,6 +163,7 @@ class GPTLiveSession:
 
         try:
             logger.info("GPT-Liveセッションへ接続します")
+            self._feedback_transition_started = False
             self._closed_event.clear()
             self.websocket = await websockets.connect(
                 self.URL,
@@ -297,6 +308,15 @@ class GPTLiveSession:
                 normalize_transcript_for_display(delta, assistant=assistant),
             )
         self._transcript_buffers[label] = current + delta
+        if (
+            assistant
+            and not self._feedback_transition_started
+            and self.FEEDBACK_TRIGGER_TEXT in self._transcript_buffers[label]
+        ):
+            self._feedback_transition_started = True
+            self._feedback_transition_task = asyncio.create_task(
+                self._play_disconnect_and_resume_feedback()
+            )
         if self.display is not None:
             self.display.publish(
                 {
@@ -322,6 +342,38 @@ class GPTLiveSession:
             delay, self._flush_transcript, label
         )
         return True
+
+    async def _play_disconnect_and_resume_feedback(self) -> None:
+        """犯人役の終了後に切断音を挟み、GPTへ振り返り再開を伝える。"""
+        try:
+            # 終了の台詞に対応する音声デルタを受信キューへ入れる時間を確保する。
+            await asyncio.sleep(self.TRANSCRIPT_SENTENCE_SECONDS)
+            await self.audio.wait_until_played()
+            logger.info("詐欺電話終了の効果音を再生します")
+            await self.audio.play_audio_file(self.DISCONNECT_AUDIO_PATH)
+            self.audio.clear_input_queue()
+            if self.display is not None:
+                self.display.publish(
+                    {
+                        "type": "feedback",
+                        "active": True,
+                        "image": "refund-fraud-warning.png",
+                        "alt": "還付金詐欺にご用心！",
+                    }
+                )
+            await self._send_event(
+                {
+                    "type": "session.instructions.append",
+                    "event_id": "resume_feedback_after_disconnect",
+                    "delegation_id": None,
+                    "content": self.FEEDBACK_RESUME_INSTRUCTION,
+                }
+            )
+            logger.info("GPT-Liveへ振り返りの開始を指示しました")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("詐欺電話終了の効果音を再生できませんでした")
 
     def _flush_transcript(self, label: str) -> None:
         handle = self._transcript_flush_handles.pop(label, None)
@@ -474,6 +526,12 @@ class GPTLiveSession:
         return False
 
     async def _abort_start(self) -> None:
+        if self._feedback_transition_task is not None:
+            self._feedback_transition_task.cancel()
+            await asyncio.gather(
+                self._feedback_transition_task, return_exceptions=True
+            )
+            self._feedback_transition_task = None
         if self._sender_task is not None:
             self._sender_task.cancel()
             await asyncio.gather(self._sender_task, return_exceptions=True)
@@ -492,6 +550,12 @@ class GPTLiveSession:
         was_running = self.websocket is not None
         if was_running:
             logger.info("GPT-Liveセッションを終了します")
+        if self._feedback_transition_task is not None:
+            self._feedback_transition_task.cancel()
+            await asyncio.gather(
+                self._feedback_transition_task, return_exceptions=True
+            )
+            self._feedback_transition_task = None
         if self._sender_task is not None:
             self._sender_task.cancel()
             await asyncio.gather(self._sender_task, return_exceptions=True)

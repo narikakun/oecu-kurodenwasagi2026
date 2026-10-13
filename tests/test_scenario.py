@@ -48,6 +48,12 @@ class RefundFraudScenarioTest(unittest.TestCase):
         self.assertIn("危険行動の扱い", self.scenario)
         self.assertIn("途中まで従ったことを責めず", self.scenario)
 
+    def test_waits_for_disconnect_sound_before_feedback(self):
+        self.assertIn("犯人役から振り返りへ移る共通手順", self.scenario)
+        self.assertIn("「それでは失礼します」とだけ言う", self.scenario)
+        self.assertIn("通話終了音の再生完了", self.scenario)
+        self.assertIn("振り返りや次の言葉を一切話さない", self.scenario)
+
     def test_does_not_provide_actionable_transfer_steps(self):
         self.assertIn("ATMの具体的なボタン順", self.scenario)
         self.assertIn("具体的な送金操作へは進まない", self.scenario)

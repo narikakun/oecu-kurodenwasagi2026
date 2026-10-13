@@ -52,6 +52,23 @@ class DisplayServerTest(unittest.TestCase):
         self.assertIn("family=LINE+Seed+JP:wght@400;700", html)
         self.assertIn('font-family:"LINE Seed JP"', html)
 
+    def test_feedback_mode_shows_warning_image_with_transcripts(self):
+        asset_directory = (
+            Path(__file__).parents[1]
+            / "src"
+            / "kuro_sagi_denwa"
+            / "assets"
+            / "display"
+        )
+        html = (asset_directory / "index.html").read_text(encoding="utf-8")
+
+        self.assertTrue((asset_directory / "refund-fraud-warning.png").is_file())
+        self.assertIn(".frame.feedback-mode #feedback { display:flex; }", html)
+        self.assertIn(".frame.feedback-mode #messages", html)
+        self.assertIn("event.type === 'feedback'", html)
+        self.assertIn("messages.replaceChildren(); partials.clear();", html)
+        self.assertIn("refund-fraud-warning.png", html)
+
 
 if __name__ == "__main__":
     unittest.main()
