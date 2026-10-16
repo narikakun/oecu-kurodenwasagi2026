@@ -469,16 +469,10 @@ class GPTLiveSession:
     async def _wait_for_output_audio_to_finish(self) -> None:
         """音声デルタが静まり、端末の再生が完了した状態を確認する。"""
         loop = asyncio.get_running_loop()
-        started_at = loop.time()
         deadline = loop.time() + self.OUTPUT_AUDIO_FINISH_TIMEOUT_SECONDS
-        # 字幕が音声より先に届く場合、音声がまだ1件も届いていないのに
-        # 「静かになった」と誤判定しない。直前2秒以内の音声、または終了句検出後に
-        # 到着した音声を最低1件確認してから、静音と再生完了を判定する。
-        audio_seen = (
-            self._last_output_audio_at > 0
-            and started_at - self._last_output_audio_at
-            <= self.OUTPUT_AUDIO_QUIET_SECONDS
-        )
+        # 終了字幕より音声が先に届き終わる場合もあるため、新しい音声デルタの到着は
+        # 必須にせず、既存キューの再生完了と静音時間で判定する。
+        self._last_output_audio_at = max(self._last_output_audio_at, loop.time())
         while True:
             remaining = deadline - loop.time()
             if remaining <= 0:
@@ -487,12 +481,6 @@ class GPTLiveSession:
                     self.OUTPUT_AUDIO_FINISH_TIMEOUT_SECONDS,
                 )
                 return
-            if not audio_seen:
-                if self._last_output_audio_at >= started_at:
-                    audio_seen = True
-                else:
-                    await asyncio.sleep(min(0.05, remaining))
-                    continue
             received_at = self._last_output_audio_at
             quiet_remaining = self.OUTPUT_AUDIO_QUIET_SECONDS - (
                 loop.time() - received_at

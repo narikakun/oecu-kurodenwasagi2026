@@ -407,13 +407,14 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(display.events[-1]["type"], "feedback")
 
-    async def test_disconnect_waits_for_first_audio_after_early_transcript(self):
+    async def test_disconnect_does_not_wait_full_timeout_when_audio_precedes_transcript(self):
         audio = DummyAudio()
         display = FakeDisplay()
         session = GPTLiveSession(Settings(api_key="test-key"), audio, display)
         session.OUTPUT_AUDIO_QUIET_SECONDS = 0.01
         session.OUTPUT_AUDIO_FINISH_TIMEOUT_SECONDS = 0.2
         session.websocket = FakeWebSocket()
+        session._last_output_audio_at = asyncio.get_running_loop().time()
 
         session._log_transcript(
             {
@@ -422,17 +423,8 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
             }
         )
         transition = session._feedback_transition_task
-        await asyncio.sleep(0.03)
+        await asyncio.wait_for(transition, timeout=0.1)
 
-        self.assertFalse(transition.done())
-        self.assertEqual(audio.played_files, [])
-
-        await session._handle_server_event(
-            {"type": "session.output_audio.delta", "delta": "cGNt"}
-        )
-        await asyncio.wait_for(transition, timeout=0.2)
-
-        self.assertEqual(audio.played, [b"pcm"])
         self.assertEqual(
             audio.played_files,
             [(session.DISCONNECT_AUDIO_PATH, 1.0)],
