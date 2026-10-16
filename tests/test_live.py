@@ -376,8 +376,8 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
     def test_disconnect_wait_allows_for_raspberry_pi_audio_delay(self):
         session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio())
 
-        self.assertGreaterEqual(session.OUTPUT_AUDIO_QUIET_SECONDS, 2.0)
-        self.assertEqual(session.OUTPUT_AUDIO_FINISH_TIMEOUT_SECONDS, 10.0)
+        self.assertEqual(session.OUTPUT_AUDIO_QUIET_SECONDS, 0.5)
+        self.assertEqual(session.OUTPUT_AUDIO_FINISH_TIMEOUT_SECONDS, 2.0)
 
     async def test_disconnect_continues_when_output_never_finishes(self):
         audio = DummyAudio()
