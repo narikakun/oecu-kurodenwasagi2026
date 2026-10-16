@@ -63,7 +63,7 @@ class DisplayServerTest(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn(".bubble { max-width:92%;", html)
-        self.assertIn("font-size:clamp(54px,7.5vw,96px)", html)
+        self.assertIn("font-size:clamp(36px,5vw,64px)", html)
         self.assertIn("overflow-wrap:anywhere", html)
 
     def test_feedback_mode_shows_warning_image_with_transcripts(self):
