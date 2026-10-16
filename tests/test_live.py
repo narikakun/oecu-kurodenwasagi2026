@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 from kuro_sagi_denwa.config import Settings
 from kuro_sagi_denwa.live import (
     GPTLiveSession,
+    is_feedback_trigger,
     normalize_transcript_for_display,
     normalize_transcript_numbers,
 )
@@ -845,6 +846,35 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
         await session.notify_dial(7)
 
         self.assertEqual(session.websocket.sent, [])
+
+
+class FeedbackTriggerTest(unittest.TestCase):
+    def test_accepts_common_closing_phrases(self):
+        for text in (
+            "それでは失礼します。",
+            "では失礼します。",
+            "それでは、失礼します。",
+            "承知しました。それでは失礼します",
+            "それでは 失礼 します",
+            "それでは失礼いたします。",
+            "では、失礼致します。",
+            "それじゃあ失礼します。",
+            "じゃあ失礼します",
+            "それでは、しつれいします。",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(is_feedback_trigger(text))
+
+    def test_ignores_opening_and_unrelated_phrases(self):
+        for text in (
+            "突然のお電話で失礼します。",
+            "お忙しいところ失礼します。",
+            "失礼しました。",
+            "それではご案内します。",
+            "では",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(is_feedback_trigger(text))
 
 
 if __name__ == "__main__":

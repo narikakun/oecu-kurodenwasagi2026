@@ -28,6 +28,20 @@ _SMALL_NUMBER_UNITS = {"十": 10, "百": 100, "千": 1_000}
 _LARGE_NUMBER_UNITS = {"万": 10_000, "億": 100_000_000, "兆": 1_000_000_000_000}
 _KANJI_NUMBER_RE = re.compile(r"[0-9〇零一二三四五六七八九十百千万億兆]+")
 _FULL_WIDTH_DIGIT_TABLE = str.maketrans("０１２３４５６７８９", "0123456789")
+# 終了句の判定前に取り除く空白と句読点。文字起こしの区切り方の揺れを吸収する。
+_FEEDBACK_TRIGGER_IGNORED_RE = re.compile(r"[\s、。,.，．!！?？…・「」『』]")
+# 「それでは失礼します」「では失礼します」「それでは失礼いたします」などを受け付ける。
+# 冒頭の「突然のお電話で失礼します」に反応しないよう、前置きの「では」等は必須にする。
+_FEEDBACK_TRIGGER_RE = re.compile(
+    r"(?:それでは|それじゃあ?|では|じゃあ?)(?:失礼|しつれい)(?:いた|致)?します"
+)
+
+
+def is_feedback_trigger(text: str) -> bool:
+    """犯人役の終了句が含まれているかを、表記や区切りの揺れを許して判定する。"""
+    return _FEEDBACK_TRIGGER_RE.search(
+        _FEEDBACK_TRIGGER_IGNORED_RE.sub("", text)
+    ) is not None
 _TRANSCRIPT_TERM_REPLACEMENTS = {
     "エーティーエム": "ATM",
     "エー・ティー・エム": "ATM",
@@ -360,11 +374,9 @@ class GPTLiveSession:
         if (
             assistant
             and not self._feedback_transition_started
-            and re.search(
-                r"それでは[\s、,]*失礼します",
-                self._transcript_buffers[label],
-            )
+            and is_feedback_trigger(self._transcript_buffers[label])
         ):
+            logger.info("終了句を検出しました: %s", self._transcript_buffers[label])
             self._feedback_transition_started = True
             self._feedback_transition_task = asyncio.create_task(
                 self._play_disconnect_and_resume_feedback()
