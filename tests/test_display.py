@@ -52,6 +52,20 @@ class DisplayServerTest(unittest.TestCase):
         self.assertIn("family=LINE+Seed+JP:wght@400;700", html)
         self.assertIn('font-family:"LINE Seed JP"', html)
 
+    def test_transcript_text_is_large_and_uses_most_of_the_screen_width(self):
+        html = (
+            Path(__file__).parents[1]
+            / "src"
+            / "kuro_sagi_denwa"
+            / "assets"
+            / "display"
+            / "index.html"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(".bubble { max-width:92%;", html)
+        self.assertIn("font-size:clamp(36px,5vw,64px)", html)
+        self.assertIn("overflow-wrap:anywhere", html)
+
     def test_feedback_mode_shows_warning_image_with_transcripts(self):
         asset_directory = (
             Path(__file__).parents[1]
