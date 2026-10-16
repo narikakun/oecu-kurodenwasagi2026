@@ -276,6 +276,7 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
         display = FakeDisplay()
         session = GPTLiveSession(Settings(api_key="test-key"), audio, display)
         session.OUTPUT_AUDIO_QUIET_SECONDS = 0
+        session.OUTPUT_AUDIO_FINISH_TIMEOUT_SECONDS = 0
         session.websocket = FakeWebSocket()
 
         session._log_transcript(
@@ -358,6 +359,7 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
     async def test_disconnect_trigger_accepts_japanese_comma(self):
         session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio())
         session.OUTPUT_AUDIO_QUIET_SECONDS = 0
+        session.OUTPUT_AUDIO_FINISH_TIMEOUT_SECONDS = 0
         session.websocket = FakeWebSocket()
 
         session._log_transcript(
@@ -403,6 +405,37 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
             [(session.DISCONNECT_AUDIO_PATH, 1.0)],
         )
         self.assertEqual(display.events[-1]["type"], "feedback")
+
+    async def test_disconnect_waits_for_first_audio_after_early_transcript(self):
+        audio = DummyAudio()
+        display = FakeDisplay()
+        session = GPTLiveSession(Settings(api_key="test-key"), audio, display)
+        session.OUTPUT_AUDIO_QUIET_SECONDS = 0.01
+        session.OUTPUT_AUDIO_FINISH_TIMEOUT_SECONDS = 0.2
+        session.websocket = FakeWebSocket()
+
+        session._log_transcript(
+            {
+                "type": "session.output_transcript.delta",
+                "delta": "それでは失礼します。",
+            }
+        )
+        transition = session._feedback_transition_task
+        await asyncio.sleep(0.03)
+
+        self.assertFalse(transition.done())
+        self.assertEqual(audio.played_files, [])
+
+        await session._handle_server_event(
+            {"type": "session.output_audio.delta", "delta": "cGNt"}
+        )
+        await asyncio.wait_for(transition, timeout=0.2)
+
+        self.assertEqual(audio.played, [b"pcm"])
+        self.assertEqual(
+            audio.played_files,
+            [(session.DISCONNECT_AUDIO_PATH, 1.0)],
+        )
 
     async def test_assistant_caption_restores_official_moriguchi_spelling(self):
         display = FakeDisplay()
