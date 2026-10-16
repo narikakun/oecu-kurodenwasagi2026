@@ -559,6 +559,24 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("GPT-Liveの受信処理が停止しました", logs.output[0])
         self.assertIn("bad_request", logs.output[0])
+        with self.assertRaisesRegex(
+            RuntimeError, "GPT-Liveのバックグラウンド処理が停止しました"
+        ):
+            await session.wait_for_failure()
+
+    async def test_reports_unexpected_normal_receiver_exit_as_failure(self):
+        session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio())
+
+        task = asyncio.create_task(asyncio.sleep(0))
+        await task
+        with self.assertLogs("kuro_sagi_denwa.live", level="ERROR") as logs:
+            session._report_receiver_failure(task)
+
+        self.assertIn("予期せず終了", logs.output[0])
+        with self.assertRaisesRegex(
+            RuntimeError, "GPT-Liveのバックグラウンド処理が停止しました"
+        ):
+            await session.wait_for_failure()
 
     @staticmethod
     async def _raise_error(error):
