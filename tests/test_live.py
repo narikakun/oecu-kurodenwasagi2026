@@ -23,6 +23,8 @@ class DummyAudio:
         self.clear_count = 0
         self.start_count = 0
         self.stop_count = 0
+        self.input_drop_count = 0
+        self.input_drop_streak = 0
 
     async def start(self):
         self.start_count += 1
@@ -647,6 +649,27 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(audio.clear_count, 1)
         self.assertEqual(session._next_audio_send_time, 101.0)
 
+    async def test_repeated_input_audio_rate_limit_restarts_session(self):
+        audio = DummyAudio()
+        session = GPTLiveSession(Settings(api_key="test-key"), audio)
+        session.websocket = FakeWebSocket()
+        event = {
+            "type": "error",
+            "error": {
+                "code": "input_audio_rate_limit_exceeded",
+                "message": "Input audio is arriving too quickly",
+            },
+        }
+
+        with self.assertLogs("kuro_sagi_denwa.live", level="WARNING") as logs:
+            self.assertFalse(await session._handle_server_event(event))
+            self.assertFalse(await session._handle_server_event(event))
+            with self.assertRaisesRegex(RuntimeError, "速度制限が継続"):
+                await session._handle_server_event(event)
+
+        self.assertEqual(audio.clear_count, 3)
+        self.assertEqual(sum("送信速度制限" in line for line in logs.output), 1)
+
     async def test_audio_pacing_absorbs_send_cost_and_small_sleep_jitter(self):
         session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio())
         now = 100.0
@@ -670,7 +693,23 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
 
         # 2秒の音声で毎回の3msのコストを蓄積しない。
         self.assertLess(sends[-1] - sends[0], 2.01)
-        self.assertGreaterEqual(min(b - a for a, b in zip(sends, sends[1:])), 0.02 / 1.1 - 1e-9)
+        self.assertGreaterEqual(
+            min(b - a for a, b in zip(sends, sends[1:])), 0.02 - 1e-9
+        )
+
+    async def test_sustained_input_backlog_stops_sender_for_service_restart(self):
+        audio = DummyAudio()
+        settings = Settings(api_key="test-key", block_ms=20)
+        session = GPTLiveSession(settings, audio)
+        session.websocket = FakeWebSocket()
+        audio.input_drop_count = 500
+        audio.input_drop_streak = 500
+        await audio.input_queue.put(bytes(960))
+
+        with self.assertRaisesRegex(RuntimeError, "入力音声の滞留が継続"):
+            await session._send_audio_loop()
+
+        await asyncio.wait_for(audio.input_queue.join(), timeout=0.1)
 
     async def test_slow_send_does_not_add_an_extra_packet_wait(self):
         session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio())
