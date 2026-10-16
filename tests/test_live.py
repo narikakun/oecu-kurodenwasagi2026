@@ -355,6 +355,26 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
             [(session.DISCONNECT_AUDIO_PATH, 1.0)],
         )
 
+    async def test_disconnect_trigger_accepts_japanese_comma(self):
+        session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio())
+        session.OUTPUT_AUDIO_QUIET_SECONDS = 0
+        session.websocket = FakeWebSocket()
+
+        session._log_transcript(
+            {
+                "type": "session.output_transcript.delta",
+                "delta": "それでは、失礼します。",
+            }
+        )
+
+        self.assertIsNotNone(session._feedback_transition_task)
+        await session._feedback_transition_task
+
+    def test_disconnect_wait_allows_for_raspberry_pi_audio_delay(self):
+        session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio())
+
+        self.assertGreaterEqual(session.OUTPUT_AUDIO_QUIET_SECONDS, 2.0)
+
     async def test_assistant_caption_restores_official_moriguchi_spelling(self):
         display = FakeDisplay()
         session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio(), display)
