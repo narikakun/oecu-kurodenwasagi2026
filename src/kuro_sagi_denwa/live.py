@@ -7,6 +7,7 @@ import base64
 import json
 import logging
 import re
+import time
 import wave
 from pathlib import Path
 from typing import Any
@@ -101,7 +102,7 @@ class GPTLiveSession:
         Path(__file__).parent / "assets" / "audio" / "moshimoshi-meridian.wav"
     )
     DISCONNECT_AUDIO_PATH = (
-        Path(__file__).parent / "assets" / "audio" / "call-disconnect.mp3"
+        Path(__file__).parent / "assets" / "audio" / "call-disconnect.wav"
     )
     FEEDBACK_TRIGGER_TEXT = "それでは失礼します"
     FEEDBACK_RESUME_INSTRUCTION = (
@@ -131,6 +132,7 @@ class GPTLiveSession:
     FIRST_AUDIO_TIMEOUT_SECONDS = 1
     TRANSCRIPT_IDLE_SECONDS = 1.0
     TRANSCRIPT_SENTENCE_SECONDS = 0.15
+    OUTPUT_AUDIO_QUIET_SECONDS = 0.75
 
     def __init__(
         self,
@@ -152,6 +154,9 @@ class GPTLiveSession:
         self._closed_event = asyncio.Event()
         self._prepared = False
         self._next_audio_send_time = 0.0
+        self._last_output_audio_at = 0.0
+        self._last_output_audio_log_at = 0.0
+        self._output_audio_burst_count = 0
         self._transcript_buffers: dict[str, str] = {}
         self._transcript_flush_handles: dict[str, asyncio.TimerHandle] = {}
 
@@ -321,6 +326,14 @@ class GPTLiveSession:
                 normalize_transcript_for_display(delta, assistant=assistant),
             )
         self._transcript_buffers[label] = current + delta
+        logger.info(
+            "同期計測 transcript_received speaker=%s monotonic_ms=%d start_ms=%s end_ms=%s chars=%d",
+            "user" if label == "参加者" else "assistant",
+            round(time.monotonic() * 1000),
+            event.get("start_ms"),
+            event.get("end_ms"),
+            len(delta),
+        )
         if (
             assistant
             and not self._feedback_transition_started
@@ -358,10 +371,18 @@ class GPTLiveSession:
 
     async def _play_disconnect_and_resume_feedback(self) -> None:
         """犯人役の終了後に切断音を挟み、GPTへ振り返り再開を伝える。"""
+        input_muted = False
         try:
-            # 終了の台詞に対応する音声デルタを受信キューへ入れる時間を確保する。
-            await asyncio.sleep(self.TRANSCRIPT_SENTENCE_SECONDS)
-            await self.audio.wait_until_played()
+            # Live WebSocketには発話完了イベントがないため、終了句を検出した後は
+            # 入力を止め、音声デルタの受信と実機の再生が静まるまで待つ。
+            await self._send_event(
+                {
+                    "type": "session.input_audio.mute",
+                    "event_id": "mute_during_disconnect_sound",
+                }
+            )
+            input_muted = True
+            await self._wait_for_output_audio_to_finish()
             logger.info("詐欺電話終了の効果音を再生します")
             await self.audio.play_audio_file(self.DISCONNECT_AUDIO_PATH)
             self.audio.clear_input_queue()
@@ -376,6 +397,13 @@ class GPTLiveSession:
                 )
             await self._send_event(
                 {
+                    "type": "session.input_audio.unmute",
+                    "event_id": "unmute_after_disconnect_sound",
+                }
+            )
+            input_muted = False
+            await self._send_event(
+                {
                     "type": "session.instructions.append",
                     "event_id": "resume_feedback_after_disconnect",
                     "delegation_id": None,
@@ -387,6 +415,36 @@ class GPTLiveSession:
             raise
         except Exception:
             logger.exception("詐欺電話終了の効果音を再生できませんでした")
+        finally:
+            if input_muted and self.websocket is not None:
+                try:
+                    await self._send_event(
+                        {
+                            "type": "session.input_audio.unmute",
+                            "event_id": "recover_input_after_disconnect_error",
+                        }
+                    )
+                except Exception:
+                    logger.exception("終話音エラー後に音声入力を再開できませんでした")
+
+    async def _wait_for_output_audio_to_finish(self) -> None:
+        """音声デルタが静まり、端末の再生が完了した状態を確認する。"""
+        loop = asyncio.get_running_loop()
+        # トリガー文字列が音声より先に届く場合にも、後続デルタを待つ。
+        self._last_output_audio_at = max(self._last_output_audio_at, loop.time())
+        while True:
+            received_at = self._last_output_audio_at
+            quiet_remaining = self.OUTPUT_AUDIO_QUIET_SECONDS - (
+                loop.time() - received_at
+            )
+            if quiet_remaining > 0:
+                await asyncio.sleep(quiet_remaining)
+            await self.audio.wait_until_played()
+            if (
+                self._last_output_audio_at == received_at
+                and loop.time() - received_at >= self.OUTPUT_AUDIO_QUIET_SECONDS
+            ):
+                return
 
     def _flush_transcript(self, label: str) -> None:
         handle = self._transcript_flush_handles.pop(label, None)
@@ -540,7 +598,19 @@ class GPTLiveSession:
         self._log_transcript(event)
 
         if event_type == "session.output_audio.delta":
-            await self.audio.play(base64.b64decode(event["delta"]))
+            received_at = asyncio.get_running_loop().time()
+            pcm = base64.b64decode(event["delta"])
+            if received_at - self._last_output_audio_log_at >= 0.25:
+                self._output_audio_burst_count += 1
+                logger.info(
+                    "同期計測 audio_received burst=%d monotonic_ms=%d bytes=%d",
+                    self._output_audio_burst_count,
+                    round(received_at * 1000),
+                    len(pcm),
+                )
+            self._last_output_audio_log_at = received_at
+            self._last_output_audio_at = received_at
+            await self.audio.play(pcm)
         elif event_type == "error":
             error = event.get("error", {})
             message = error.get("message", "不明なエラー")

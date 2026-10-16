@@ -487,6 +487,36 @@ class BellRingerStreamTest(unittest.IsolatedAsyncioTestCase):
 
 
 class AudioDeviceAudienceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_logs_output_queue_and_playback_start_timing(self):
+        class FakeStream:
+            def start(self):
+                pass
+
+            def write(self, data):
+                return False
+
+            def stop(self):
+                pass
+
+            def close(self):
+                pass
+
+        audio = AudioDevice(Settings(api_key="test", audio_device_sample_rate=24_000))
+        audio._output_stream = FakeStream()
+        task = asyncio.create_task(audio._play_loop())
+
+        with self.assertLogs("kuro_sagi_denwa.audio", level="INFO") as logs:
+            await audio.play(array("h", [1000]).tobytes())
+            await audio.output_queue.join()
+            await audio.wait_until_played()
+            await audio.output_queue.put(None)
+            await task
+
+        output = "\n".join(logs.output)
+        self.assertIn("同期計測 output_queued output=受話器出力 burst=1", output)
+        self.assertIn("同期計測 output_started output=受話器出力 burst=1", output)
+        self.assertIn("queue_wait_ms=", output)
+
     async def test_output_conversion_does_not_block_event_loop(self):
         import threading
 

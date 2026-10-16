@@ -273,6 +273,7 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
         audio = DummyAudio()
         display = FakeDisplay()
         session = GPTLiveSession(Settings(api_key="test-key"), audio, display)
+        session.OUTPUT_AUDIO_QUIET_SECONDS = 0
         session.websocket = FakeWebSocket()
 
         session._log_transcript(
@@ -302,11 +303,19 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
             session.websocket.sent,
             [
                 {
+                    "type": "session.input_audio.mute",
+                    "event_id": "mute_during_disconnect_sound",
+                },
+                {
+                    "type": "session.input_audio.unmute",
+                    "event_id": "unmute_after_disconnect_sound",
+                },
+                {
                     "type": "session.instructions.append",
                     "event_id": "resume_feedback_after_disconnect",
                     "delegation_id": None,
                     "content": session.FEEDBACK_RESUME_INSTRUCTION,
-                }
+                },
             ],
         )
 
@@ -314,6 +323,35 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
             {"type": "session.output_transcript.delta", "delta": "。それでは失礼します"}
         )
         self.assertEqual(len(audio.played_files), 1)
+
+    async def test_disconnect_waits_for_late_output_audio_delta(self):
+        audio = DummyAudio()
+        session = GPTLiveSession(Settings(api_key="test-key"), audio)
+        session.OUTPUT_AUDIO_QUIET_SECONDS = 0.03
+        session.websocket = FakeWebSocket()
+
+        session._log_transcript(
+            {
+                "type": "session.output_transcript.delta",
+                "delta": "それでは失礼します",
+            }
+        )
+        transition = session._feedback_transition_task
+        self.assertIsNotNone(transition)
+        await asyncio.sleep(0.02)
+        await session._handle_server_event(
+            {"type": "session.output_audio.delta", "delta": "cGNt"}
+        )
+        await asyncio.sleep(0.02)
+
+        self.assertFalse(transition.done())
+        self.assertEqual(audio.played_files, [])
+        await transition
+        self.assertEqual(audio.played, [b"pcm"])
+        self.assertEqual(
+            audio.played_files,
+            [(session.DISCONNECT_AUDIO_PATH, 1.0)],
+        )
 
     async def test_assistant_caption_restores_official_moriguchi_spelling(self):
         display = FakeDisplay()
@@ -473,6 +511,29 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(display.events[0]["status"], "partial")
         self.assertEqual(display.events[1]["text"], "こんにちは、元気ですか？")
         self.assertEqual(display.events[-1]["status"], "final")
+
+    async def test_logs_transcript_and_audio_sync_timing_without_audio_payload(self):
+        session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio())
+
+        with self.assertLogs("kuro_sagi_denwa.live", level="INFO") as logs:
+            session._log_transcript(
+                {
+                    "type": "session.output_transcript.delta",
+                    "delta": "こんにちは",
+                    "start_ms": 1200,
+                    "end_ms": 1500,
+                }
+            )
+            await session._handle_server_event(
+                {"type": "session.output_audio.delta", "delta": "cGNt"}
+            )
+
+        output = "\n".join(logs.output)
+        self.assertIn("同期計測 transcript_received speaker=assistant", output)
+        self.assertIn("start_ms=1200 end_ms=1500", output)
+        self.assertIn("同期計測 audio_received burst=1", output)
+        self.assertIn("bytes=3", output)
+        self.assertNotIn("cGNt", output)
 
     async def test_does_not_log_audio_base64(self):
         session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio())
