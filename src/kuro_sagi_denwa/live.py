@@ -135,6 +135,7 @@ class GPTLiveSession:
     # GPT-Liveの主WebSocketには出力音声の完了イベントがないため、字幕が先行しやすい
     # Raspberry Piでも末尾音声が届くまで待てる長さを確保する。
     OUTPUT_AUDIO_QUIET_SECONDS = 2.0
+    OUTPUT_AUDIO_FINISH_TIMEOUT_SECONDS = 10.0
     INPUT_BACKLOG_RESTART_SECONDS = 10
     RATE_LIMIT_RESTART_COUNT = 3
     RATE_LIMIT_RESTART_WINDOW_SECONDS = 30
@@ -398,6 +399,7 @@ class GPTLiveSession:
         """犯人役の終了後に切断音を挟み、GPTへ振り返り再開を伝える。"""
         input_muted = False
         try:
+            logger.info("終了句を検出したため末尾音声の再生完了を待ちます")
             # Live WebSocketには発話完了イベントがないため、終了句を検出した後は
             # 入力を止め、音声デルタの受信と実機の再生が静まるまで待つ。
             await self._send_event(
@@ -455,16 +457,33 @@ class GPTLiveSession:
     async def _wait_for_output_audio_to_finish(self) -> None:
         """音声デルタが静まり、端末の再生が完了した状態を確認する。"""
         loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.OUTPUT_AUDIO_FINISH_TIMEOUT_SECONDS
         # トリガー文字列が音声より先に届く場合にも、後続デルタを待つ。
         self._last_output_audio_at = max(self._last_output_audio_at, loop.time())
         while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                logger.warning(
+                    "末尾音声の完了を%.1f秒待ちましたが、切断処理を続行します",
+                    self.OUTPUT_AUDIO_FINISH_TIMEOUT_SECONDS,
+                )
+                return
             received_at = self._last_output_audio_at
             quiet_remaining = self.OUTPUT_AUDIO_QUIET_SECONDS - (
                 loop.time() - received_at
             )
             if quiet_remaining > 0:
-                await asyncio.sleep(quiet_remaining)
-            await self.audio.wait_until_played()
+                await asyncio.sleep(min(quiet_remaining, remaining))
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                continue
+            try:
+                await asyncio.wait_for(
+                    self.audio.wait_until_played(),
+                    timeout=remaining,
+                )
+            except asyncio.TimeoutError:
+                continue
             if (
                 self._last_output_audio_at == received_at
                 and loop.time() - received_at >= self.OUTPUT_AUDIO_QUIET_SECONDS
