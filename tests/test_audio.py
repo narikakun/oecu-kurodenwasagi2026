@@ -376,11 +376,15 @@ class AudioDeviceTest(unittest.TestCase):
         for index in range(100):
             audio._capture_callback(array("h", [index] * 480).tobytes(), 480, None, None)
         self.assertEqual(audio.input_queue.qsize(), 10)
+        self.assertEqual(audio.input_drop_streak, 90)
         packet = audio.input_queue.get_nowait()
         self.assertEqual(array("h", packet)[0], 90)
         audio.input_queue.task_done()
         audio.clear_input_queue()
         self.assertEqual(audio.input_queue._unfinished_tasks, 0)
+
+        audio._capture_callback(array("h", [100] * 480).tobytes(), 480, None, None)
+        self.assertEqual(audio.input_drop_streak, 0)
 
     def test_vectorized_volume_preserves_truncation_and_clips(self):
         source = array("h", [-32768, -3, 0, 3, 32767])
@@ -487,6 +491,40 @@ class BellRingerStreamTest(unittest.IsolatedAsyncioTestCase):
 
 
 class AudioDeviceAudienceTest(unittest.IsolatedAsyncioTestCase):
+    async def test_full_output_worker_applies_backpressure_without_dropping(self):
+        import threading
+
+        class BlockingWorker:
+            def __init__(self):
+                self.entered = threading.Event()
+                self.release = threading.Event()
+                self.received = []
+
+            def put(self, data):
+                self.entered.set()
+                self.release.wait(timeout=1)
+                self.received.append(data)
+
+        audio = AudioDevice(Settings(api_key="test"))
+        worker = BlockingWorker()
+        audio._output_worker = worker
+        task = asyncio.create_task(audio._play_loop())
+        packet = bytes(960)
+
+        try:
+            await audio.play(packet)
+            self.assertTrue(await asyncio.to_thread(worker.entered.wait, 0.5))
+            with self.assertRaises(asyncio.TimeoutError):
+                await asyncio.wait_for(audio.output_queue.join(), timeout=0.01)
+            worker.release.set()
+            await asyncio.wait_for(audio.output_queue.join(), timeout=0.5)
+            self.assertEqual(worker.received, [packet])
+        finally:
+            worker.release.set()
+            audio._output_worker = None
+            await audio.output_queue.put(None)
+            await task
+
     async def test_logs_output_queue_and_playback_start_timing(self):
         class FakeStream:
             def start(self):

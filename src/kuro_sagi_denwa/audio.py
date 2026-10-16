@@ -56,6 +56,7 @@ class _OutputWorker:
         self.thread.start()
 
     def put(self, data: bytes) -> None:
+        """再生速度に追従してキューへ入れ、満杯時も音声を破棄しない。"""
         if not self.accepting or self.closed:
             return
         queued_at = time.monotonic()
@@ -70,10 +71,14 @@ class _OutputWorker:
                 self.queue.qsize(),
             )
         self._last_put_at = queued_at
-        try:
-            self.queue.put_nowait(data)
-        except queue.Full:
-            logger.warning("%s再生キューが満杯のため、一部の音声を破棄します", self.label)
+        while self.accepting and not self.closed:
+            try:
+                self.queue.put(data, timeout=0.25)
+                return
+            except queue.Full:
+                # 再生ワーカーが空きを作るまで待ち、GPT-Liveの受信側へ
+                # バックプレッシャーを伝える。停止・切断時だけ待機を抜ける。
+                continue
 
     def join(self) -> None:
         self.queue.join()
@@ -1073,6 +1078,7 @@ class AudioDevice:
             maxsize=max(1, 200 // settings.block_ms)
         )
         self.input_drop_count = 0
+        self.input_drop_streak = 0
         self.output_queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=200)
         self._input_stream: Any = None
         self._output_stream: Any = None
@@ -1101,6 +1107,7 @@ class AudioDevice:
                     self.input_queue.get_nowait()
                     self.input_queue.task_done()
                     self.input_drop_count += 1
+                    self.input_drop_streak += 1
                     if self.input_drop_count == 1 or self.input_drop_count % 100 == 0:
                         logger.warning(
                             "入力音声が滞留したため古い録音を破棄します（累計%dブロック）",
@@ -1108,6 +1115,8 @@ class AudioDevice:
                         )
                 except asyncio.QueueEmpty:
                     pass
+            else:
+                self.input_drop_streak = 0
             self.input_queue.put_nowait(data)
 
         self._loop.call_soon_threadsafe(enqueue)
@@ -1226,17 +1235,22 @@ class AudioDevice:
                 self.output_queue.task_done()
                 await self._stop_output_workers(discard=False)
                 return
-            if self._output_worker is not None:
-                self._output_worker.put(data)
-            if self._audience_worker is not None and self.audience is not None:
-                self._audience_worker.put(data)
-            self.output_queue.task_done()
+            workers = [
+                worker
+                for worker in (self._output_worker, self._audience_worker)
+                if worker is not None
+            ]
+            try:
+                if workers:
+                    # queue.Queueの空き待ちでイベントループを止めない。
+                    await asyncio.gather(
+                        *(asyncio.to_thread(worker.put, data) for worker in workers)
+                    )
+            finally:
+                self.output_queue.task_done()
 
     async def play(self, data: bytes) -> None:
-        if self.output_queue.full():
-            # 再生が追いつかない場合も、無制限にメモリを使わないよう制限する。
-            logger.warning("音声再生キューが満杯のため、一部の音声を破棄します")
-            return
+        # 満杯時は空きを待ち、受信側へバックプレッシャーを伝える。
         await self.output_queue.put(data)
 
     async def wait_until_played(self) -> None:

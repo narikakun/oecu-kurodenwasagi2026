@@ -133,6 +133,9 @@ class GPTLiveSession:
     TRANSCRIPT_IDLE_SECONDS = 1.0
     TRANSCRIPT_SENTENCE_SECONDS = 0.15
     OUTPUT_AUDIO_QUIET_SECONDS = 0.75
+    INPUT_BACKLOG_RESTART_SECONDS = 10
+    RATE_LIMIT_RESTART_COUNT = 3
+    RATE_LIMIT_RESTART_WINDOW_SECONDS = 30
 
     def __init__(
         self,
@@ -157,6 +160,8 @@ class GPTLiveSession:
         self._last_output_audio_at = 0.0
         self._last_output_audio_log_at = 0.0
         self._output_audio_burst_count = 0
+        self._rate_limit_count = 0
+        self._last_rate_limit_at = 0.0
         self._failure_future: asyncio.Future[BaseException] | None = None
         self._stopping = False
         self._background_failed = False
@@ -570,10 +575,8 @@ class GPTLiveSession:
         if started - scheduled > duration:
             scheduled = started
         # 送信開始時刻で予約し、送信処理時間を次の待ち時間に上乗せしない。
-        # 小さな待機誤差は吸収するが、追いつく速度は最大1.1倍に抑える。
-        self._next_audio_send_time = max(
-            scheduled + duration, started + duration / 1.1
-        )
+        # 小さな待機誤差は吸収するが、追いつく速度は実時間を超えない。
+        self._next_audio_send_time = scheduled + duration
         await self._send_event(
             {
                 "type": "session.input_audio.append",
@@ -586,6 +589,17 @@ class GPTLiveSession:
         while True:
             pcm = await self.audio.input_queue.get()
             try:
+                restart_threshold = max(
+                    1,
+                    self.INPUT_BACKLOG_RESTART_SECONDS
+                    * 1_000
+                    // self.settings.block_ms,
+                )
+                if self.audio.input_drop_streak >= restart_threshold:
+                    raise RuntimeError(
+                        "入力音声の滞留が継続したためGPT-Liveを再起動します"
+                        f"（連続破棄{self.audio.input_drop_streak}ブロック）"
+                    )
                 await self._send_audio_packet(pcm)
             finally:
                 self.audio.input_queue.task_done()
@@ -636,12 +650,30 @@ class GPTLiveSession:
             message = error.get("message", "不明なエラー")
             code = error.get("code")
             if code == "input_audio_rate_limit_exceeded":
-                logger.warning("入力音声の送信速度制限を検出しました: %s", message)
+                now = asyncio.get_running_loop().time()
+                if (
+                    self._last_rate_limit_at
+                    and now - self._last_rate_limit_at
+                    > self.RATE_LIMIT_RESTART_WINDOW_SECONDS
+                ):
+                    self._rate_limit_count = 0
+                self._last_rate_limit_at = now
+                self._rate_limit_count += 1
+                if self._rate_limit_count == 1 or self._rate_limit_count % 10 == 0:
+                    logger.warning(
+                        "入力音声の送信速度制限を検出しました（累計%d回）: %s",
+                        self._rate_limit_count,
+                        message,
+                    )
                 self.audio.clear_input_queue()
                 self._next_audio_send_time = max(
                     self._next_audio_send_time,
-                    asyncio.get_running_loop().time() + 1.0,
+                    now + 1.0,
                 )
+                if self._rate_limit_count >= self.RATE_LIMIT_RESTART_COUNT:
+                    raise RuntimeError(
+                        "入力音声の送信速度制限が継続したためGPT-Liveを再起動します"
+                    )
                 return False
             if code:
                 raise RuntimeError(f"GPT-Liveエラー [{code}]: {message}")
