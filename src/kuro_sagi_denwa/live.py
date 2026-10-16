@@ -150,6 +150,7 @@ class GPTLiveSession:
     # Raspberry Piでも末尾音声が届くまで待てる長さを確保する。
     OUTPUT_AUDIO_QUIET_SECONDS = 0.5
     OUTPUT_AUDIO_FINISH_TIMEOUT_SECONDS = 2.0
+    DISCONNECT_AUDIO_TIMEOUT_SECONDS = 6.0
     INPUT_BACKLOG_RESTART_SECONDS = 10
     RATE_LIMIT_RESTART_COUNT = 3
     RATE_LIMIT_RESTART_WINDOW_SECONDS = 30
@@ -423,7 +424,16 @@ class GPTLiveSession:
             input_muted = True
             await self._wait_for_output_audio_to_finish()
             logger.info("詐欺電話終了の効果音を再生します")
-            await self.audio.play_audio_file(self.DISCONNECT_AUDIO_PATH)
+            try:
+                await asyncio.wait_for(
+                    self.audio.play_audio_file(self.DISCONNECT_AUDIO_PATH),
+                    timeout=self.DISCONNECT_AUDIO_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "切断音の再生完了を%.1f秒待ちましたが、フィードバックへ進みます",
+                    self.DISCONNECT_AUDIO_TIMEOUT_SECONDS,
+                )
             self.audio.clear_input_queue()
             if self.display is not None:
                 self.display.publish(
