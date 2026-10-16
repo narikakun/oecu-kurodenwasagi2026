@@ -603,6 +603,29 @@ class AudioDeviceAudienceTest(unittest.IsolatedAsyncioTestCase):
         audio.play.assert_awaited_once_with(array("h", [500, -500]).tobytes())
         audio.wait_until_played.assert_awaited_once_with()
 
+    async def test_plays_long_audio_file_in_stream_sized_blocks(self):
+        samples = list(range(1_000))
+        fake_miniaudio = SimpleNamespace(
+            SampleFormat=SimpleNamespace(SIGNED16=None),
+            decode_file=lambda *args, **kwargs: SimpleNamespace(samples=samples),
+        )
+        audio = AudioDevice(
+            Settings(api_key="test", sample_rate=24_000, block_ms=20)
+        )
+        audio.play = AsyncMock()
+        audio.wait_until_played = AsyncMock()
+
+        with patch.dict(sys.modules, {"miniaudio": fake_miniaudio}):
+            with self.assertLogs("kuro_sagi_denwa.audio", level="INFO") as logs:
+                await audio.play_audio_file("disconnect.wav")
+
+        chunks = [call.args[0] for call in audio.play.await_args_list]
+        self.assertEqual([len(chunk) for chunk in chunks], [960, 960, 80])
+        self.assertEqual(b"".join(chunks), array("h", samples).tobytes())
+        audio.wait_until_played.assert_awaited_once_with()
+        self.assertIn("blocks=3", "\n".join(logs.output))
+        self.assertIn("音声ファイルの再生が完了", "\n".join(logs.output))
+
     async def test_slow_audience_output_does_not_block_handset_output(self):
         import threading
 
