@@ -7,6 +7,7 @@ import base64
 import json
 import logging
 import re
+import time
 import wave
 from pathlib import Path
 from typing import Any
@@ -154,6 +155,8 @@ class GPTLiveSession:
         self._prepared = False
         self._next_audio_send_time = 0.0
         self._last_output_audio_at = 0.0
+        self._last_output_audio_log_at = 0.0
+        self._output_audio_burst_count = 0
         self._transcript_buffers: dict[str, str] = {}
         self._transcript_flush_handles: dict[str, asyncio.TimerHandle] = {}
 
@@ -323,6 +326,14 @@ class GPTLiveSession:
                 normalize_transcript_for_display(delta, assistant=assistant),
             )
         self._transcript_buffers[label] = current + delta
+        logger.info(
+            "同期計測 transcript_received speaker=%s monotonic_ms=%d start_ms=%s end_ms=%s chars=%d",
+            "user" if label == "参加者" else "assistant",
+            round(time.monotonic() * 1000),
+            event.get("start_ms"),
+            event.get("end_ms"),
+            len(delta),
+        )
         if (
             assistant
             and not self._feedback_transition_started
@@ -587,8 +598,19 @@ class GPTLiveSession:
         self._log_transcript(event)
 
         if event_type == "session.output_audio.delta":
-            self._last_output_audio_at = asyncio.get_running_loop().time()
-            await self.audio.play(base64.b64decode(event["delta"]))
+            received_at = asyncio.get_running_loop().time()
+            pcm = base64.b64decode(event["delta"])
+            if received_at - self._last_output_audio_log_at >= 0.25:
+                self._output_audio_burst_count += 1
+                logger.info(
+                    "同期計測 audio_received burst=%d monotonic_ms=%d bytes=%d",
+                    self._output_audio_burst_count,
+                    round(received_at * 1000),
+                    len(pcm),
+                )
+            self._last_output_audio_log_at = received_at
+            self._last_output_audio_at = received_at
+            await self.audio.play(pcm)
         elif event_type == "error":
             error = event.get("error", {})
             message = error.get("message", "不明なエラー")

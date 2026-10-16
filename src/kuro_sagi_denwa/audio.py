@@ -8,6 +8,7 @@ import logging
 import math
 import queue
 import threading
+import time
 from array import array
 from pathlib import Path
 from typing import Any
@@ -47,6 +48,9 @@ class _OutputWorker:
         self.accepting = True
         self.underflow_count = 0
         self.abort_requested = False
+        self._last_put_at = 0.0
+        self._pending_burst: tuple[int, float] | None = None
+        self._burst_count = 0
 
     def start(self) -> None:
         self.thread.start()
@@ -54,6 +58,18 @@ class _OutputWorker:
     def put(self, data: bytes) -> None:
         if not self.accepting or self.closed:
             return
+        queued_at = time.monotonic()
+        if queued_at - self._last_put_at >= 0.25:
+            self._burst_count += 1
+            self._pending_burst = (self._burst_count, queued_at)
+            logger.info(
+                "同期計測 output_queued output=%s burst=%d monotonic_ms=%d queue_depth=%d",
+                self.label,
+                self._burst_count,
+                round(queued_at * 1000),
+                self.queue.qsize(),
+            )
+        self._last_put_at = queued_at
         try:
             self.queue.put_nowait(data)
         except queue.Full:
@@ -84,6 +100,18 @@ class _OutputWorker:
     def _write(self, data: bytes) -> None:
         if self.transform is not None:
             data = self.transform(data)
+        pending_burst = self._pending_burst
+        if pending_burst is not None:
+            burst_id, queued_at = pending_burst
+            started_at = time.monotonic()
+            self._pending_burst = None
+            logger.info(
+                "同期計測 output_started output=%s burst=%d monotonic_ms=%d queue_wait_ms=%.1f",
+                self.label,
+                burst_id,
+                round(started_at * 1000),
+                (started_at - queued_at) * 1000,
+            )
         underflowed = self.stream.write(data)
         if underflowed:
             self.underflow_count += 1

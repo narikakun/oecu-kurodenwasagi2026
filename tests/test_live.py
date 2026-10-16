@@ -512,6 +512,29 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(display.events[1]["text"], "こんにちは、元気ですか？")
         self.assertEqual(display.events[-1]["status"], "final")
 
+    async def test_logs_transcript_and_audio_sync_timing_without_audio_payload(self):
+        session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio())
+
+        with self.assertLogs("kuro_sagi_denwa.live", level="INFO") as logs:
+            session._log_transcript(
+                {
+                    "type": "session.output_transcript.delta",
+                    "delta": "こんにちは",
+                    "start_ms": 1200,
+                    "end_ms": 1500,
+                }
+            )
+            await session._handle_server_event(
+                {"type": "session.output_audio.delta", "delta": "cGNt"}
+            )
+
+        output = "\n".join(logs.output)
+        self.assertIn("同期計測 transcript_received speaker=assistant", output)
+        self.assertIn("start_ms=1200 end_ms=1500", output)
+        self.assertIn("同期計測 audio_received burst=1", output)
+        self.assertIn("bytes=3", output)
+        self.assertNotIn("cGNt", output)
+
     async def test_does_not_log_audio_base64(self):
         session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio())
 
