@@ -132,7 +132,9 @@ class GPTLiveSession:
     FIRST_AUDIO_TIMEOUT_SECONDS = 1
     TRANSCRIPT_IDLE_SECONDS = 1.0
     TRANSCRIPT_SENTENCE_SECONDS = 0.15
-    OUTPUT_AUDIO_QUIET_SECONDS = 0.75
+    # GPT-Liveの主WebSocketには出力音声の完了イベントがないため、字幕が先行しやすい
+    # Raspberry Piでも末尾音声が届くまで待てる長さを確保する。
+    OUTPUT_AUDIO_QUIET_SECONDS = 2.0
     INPUT_BACKLOG_RESTART_SECONDS = 10
     RATE_LIMIT_RESTART_COUNT = 3
     RATE_LIMIT_RESTART_WINDOW_SECONDS = 30
@@ -357,7 +359,10 @@ class GPTLiveSession:
         if (
             assistant
             and not self._feedback_transition_started
-            and self.FEEDBACK_TRIGGER_TEXT in self._transcript_buffers[label]
+            and re.search(
+                r"それでは[\s、,]*失礼します",
+                self._transcript_buffers[label],
+            )
         ):
             self._feedback_transition_started = True
             self._feedback_transition_task = asyncio.create_task(
