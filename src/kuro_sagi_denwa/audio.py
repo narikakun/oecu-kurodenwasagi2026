@@ -1303,8 +1303,21 @@ class AudioDevice:
             sample_rate=self.settings.sample_rate,
         )
         pcm = await asyncio.to_thread(scale_pcm16, sound.samples, volume)
-        await self.play(pcm)
+        bytes_per_block = (
+            self.settings.sample_rate * self.settings.block_ms // 1000 * 2
+        )
+        block_count = 0
+        for offset in range(0, len(pcm), bytes_per_block):
+            await self.play(pcm[offset : offset + bytes_per_block])
+            block_count += 1
+        logger.info(
+            "音声ファイルを再生キューへ追加しました: path=%s bytes=%d blocks=%d",
+            path,
+            len(pcm),
+            block_count,
+        )
         await self.wait_until_played()
+        logger.info("音声ファイルの再生が完了しました: path=%s", path)
 
     async def start_hold_music(self, path: str, volume: float = 0.15) -> None:
         """MP3の保留音を小さな音量で繰り返し再生する。"""
