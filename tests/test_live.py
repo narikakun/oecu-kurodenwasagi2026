@@ -374,6 +374,35 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
         session = GPTLiveSession(Settings(api_key="test-key"), DummyAudio())
 
         self.assertGreaterEqual(session.OUTPUT_AUDIO_QUIET_SECONDS, 2.0)
+        self.assertEqual(session.OUTPUT_AUDIO_FINISH_TIMEOUT_SECONDS, 10.0)
+
+    async def test_disconnect_continues_when_output_never_finishes(self):
+        audio = DummyAudio()
+        display = FakeDisplay()
+        session = GPTLiveSession(Settings(api_key="test-key"), audio, display)
+        session.OUTPUT_AUDIO_QUIET_SECONDS = 0
+        session.OUTPUT_AUDIO_FINISH_TIMEOUT_SECONDS = 0.01
+        session.websocket = FakeWebSocket()
+
+        async def never_finishes():
+            await asyncio.Event().wait()
+
+        audio.wait_until_played = never_finishes
+        with self.assertLogs("kuro_sagi_denwa.live", level="WARNING") as logs:
+            session._log_transcript(
+                {
+                    "type": "session.output_transcript.delta",
+                    "delta": "それでは失礼します。",
+                }
+            )
+            await asyncio.wait_for(session._feedback_transition_task, timeout=0.2)
+
+        self.assertIn("切断処理を続行", "\n".join(logs.output))
+        self.assertEqual(
+            audio.played_files,
+            [(session.DISCONNECT_AUDIO_PATH, 1.0)],
+        )
+        self.assertEqual(display.events[-1]["type"], "feedback")
 
     async def test_assistant_caption_restores_official_moriguchi_spelling(self):
         display = FakeDisplay()
