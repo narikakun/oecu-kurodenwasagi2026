@@ -51,12 +51,19 @@ async def run() -> None:
             events.put_nowait(event)
 
     watcher = asyncio.create_task(watch_hardware())
+    session_failure = asyncio.create_task(session.wait_for_failure())
     try:
         while True:
             get_event = asyncio.create_task(events.get())
             done, _ = await asyncio.wait(
-                {get_event, watcher}, return_when=asyncio.FIRST_COMPLETED
+                {get_event, watcher, session_failure},
+                return_when=asyncio.FIRST_COMPLETED,
             )
+            if session_failure in done:
+                get_event.cancel()
+                await asyncio.gather(get_event, return_exceptions=True)
+                # 例外をrun()の外へ伝え、systemdのRestart=on-failureで全体を初期化する。
+                session_failure.result()
             if get_event not in done:
                 get_event.cancel()
                 # GPIO監視が例外で止まった場合は、その例外でアプリを終了させる。
@@ -64,6 +71,8 @@ async def run() -> None:
                 return
             await controller.handle(get_event.result())
     finally:
+        session_failure.cancel()
+        await asyncio.gather(session_failure, return_exceptions=True)
         watcher.cancel()
         await asyncio.gather(watcher, return_exceptions=True)
         await controller.close()

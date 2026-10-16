@@ -157,6 +157,9 @@ class GPTLiveSession:
         self._last_output_audio_at = 0.0
         self._last_output_audio_log_at = 0.0
         self._output_audio_burst_count = 0
+        self._failure_future: asyncio.Future[BaseException] | None = None
+        self._stopping = False
+        self._background_failed = False
         self._transcript_buffers: dict[str, str] = {}
         self._transcript_flush_handles: dict[str, asyncio.TimerHandle] = {}
 
@@ -166,7 +169,17 @@ class GPTLiveSession:
 
     @property
     def is_conversation_active(self) -> bool:
-        return self._receiver_task is not None
+        return any(
+            task is not None and not task.done()
+            for task in (self._sender_task, self._receiver_task)
+        )
+
+    async def wait_for_failure(self) -> None:
+        """バックグラウンド送受信の異常をメイン監視ループへ伝える。"""
+        if self._failure_future is None:
+            self._failure_future = asyncio.get_running_loop().create_future()
+        error = await self._failure_future
+        raise RuntimeError("GPT-Liveのバックグラウンド処理が停止しました") from error
 
     async def prepare(self) -> None:
         """呼び出し前にGPT-Liveへの接続だけを準備する。"""
@@ -205,6 +218,8 @@ class GPTLiveSession:
         if self.is_conversation_active:
             return
 
+        self._stopping = False
+        self._background_failed = False
         if self.archive is not None:
             self.archive.begin_call()
         try:
@@ -474,24 +489,29 @@ class GPTLiveSession:
         for label in list(self._transcript_buffers):
             self._flush_transcript(label)
 
-    @staticmethod
-    def _report_receiver_failure(task: asyncio.Task[None]) -> None:
-        GPTLiveSession._report_task_failure(task, "GPT-Liveの受信処理が停止しました")
+    def _report_receiver_failure(self, task: asyncio.Task[None]) -> None:
+        self._report_task_failure(task, "GPT-Liveの受信処理が停止しました")
 
-    @staticmethod
-    def _report_sender_failure(task: asyncio.Task[None]) -> None:
-        GPTLiveSession._report_task_failure(task, "GPT-Liveの音声送信が停止しました")
+    def _report_sender_failure(self, task: asyncio.Task[None]) -> None:
+        self._report_task_failure(task, "GPT-Liveの音声送信が停止しました")
 
-    @staticmethod
-    def _report_task_failure(task: asyncio.Task[None], message: str) -> None:
-        if task.cancelled():
+    def _report_task_failure(self, task: asyncio.Task[None], message: str) -> None:
+        if task.cancelled() or self._stopping:
             return
         error = task.exception()
-        if error is not None:
+        if error is None:
+            error = RuntimeError(f"{message}（予期せず終了）")
+            logger.error("%s（予期せず終了）", message)
+        else:
             logger.error(
                 message,
                 exc_info=(type(error), error, error.__traceback__),
             )
+        if self._failure_future is None:
+            self._failure_future = asyncio.get_running_loop().create_future()
+        if not self._failure_future.done():
+            self._background_failed = True
+            self._failure_future.set_result(error)
 
     async def notify_dial(self, digit: int) -> None:
         """現在の最小構成ではダイヤルを会話制御に使用しない。"""
@@ -632,6 +652,7 @@ class GPTLiveSession:
         return False
 
     async def _abort_start(self) -> None:
+        self._stopping = True
         if self._feedback_transition_task is not None:
             self._feedback_transition_task.cancel()
             await asyncio.gather(
@@ -651,8 +672,10 @@ class GPTLiveSession:
             self.websocket = None
         self._prepared = False
         await self.audio.stop()
+        self._stopping = False
 
     async def stop(self) -> None:
+        self._stopping = True
         was_running = self.websocket is not None
         if was_running:
             logger.info("GPT-Liveセッションを終了します")
@@ -691,4 +714,5 @@ class GPTLiveSession:
         if was_running:
             logger.info("GPT-Liveセッションを終了しました")
         if self.archive is not None:
-            self.archive.end_call("completed")
+            self.archive.end_call("error" if self._background_failed else "completed")
+        self._stopping = False
