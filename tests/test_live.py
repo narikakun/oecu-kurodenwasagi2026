@@ -379,14 +379,18 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(session.OUTPUT_AUDIO_QUIET_SECONDS, 0.5)
         self.assertEqual(session.OUTPUT_AUDIO_FINISH_TIMEOUT_SECONDS, 2.0)
+        self.assertEqual(session.DISCONNECT_AUDIO_PLAYBACK_TIMEOUT_SECONDS, 12.0)
         self.assertEqual(session.FEEDBACK_QUIET_SECONDS, 5.0)
 
-    async def test_disconnect_continues_when_output_never_finishes(self):
+    async def test_feedback_does_not_start_when_disconnect_playback_never_finishes(
+        self,
+    ):
         audio = DummyAudio()
         display = FakeDisplay()
         session = GPTLiveSession(Settings(api_key="test-key"), audio, display)
         session.OUTPUT_AUDIO_QUIET_SECONDS = 0
         session.OUTPUT_AUDIO_FINISH_TIMEOUT_SECONDS = 0.01
+        session.DISCONNECT_AUDIO_PLAYBACK_TIMEOUT_SECONDS = 0.01
         session.websocket = FakeWebSocket()
 
         async def never_finishes():
@@ -403,11 +407,21 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(session._feedback_transition_task, timeout=0.2)
 
         self.assertIn("切断処理を続行", "\n".join(logs.output))
+        self.assertIn(
+            "切断音の再生完了を時間内に確認できませんでした",
+            "\n".join(logs.output),
+        )
         self.assertEqual(
             audio.played_files,
             [(session.DISCONNECT_AUDIO_PATH, 1.0)],
         )
-        self.assertEqual(display.events[-1]["type"], "feedback")
+        self.assertEqual(display.events[-1], {"type": "feedback", "active": False})
+        self.assertFalse(
+            any(
+                event["type"] == "session.instructions.append"
+                for event in session.websocket.sent
+            )
+        )
 
     async def test_feedback_does_not_start_when_disconnect_sound_cannot_be_queued(
         self,
@@ -485,6 +499,48 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
                 for event in session.websocket.sent
             )
         )
+
+    async def test_feedback_caption_waits_until_disconnect_sound_finishes(self):
+        audio = DummyAudio()
+        playback_finished = asyncio.Event()
+
+        async def wait_for_playback():
+            await playback_finished.wait()
+
+        audio.wait_until_played = wait_for_playback
+        display = FakeDisplay()
+        session = GPTLiveSession(Settings(api_key="test-key"), audio, display)
+        session.OUTPUT_AUDIO_QUIET_SECONDS = 0
+        session.OUTPUT_AUDIO_FINISH_TIMEOUT_SECONDS = 0
+        session.websocket = FakeWebSocket()
+
+        session._log_transcript(
+            {
+                "type": "session.output_transcript.delta",
+                "delta": "それでは失礼します。",
+            }
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        self.assertFalse(
+            any(
+                event["type"] == "session.instructions.append"
+                for event in session.websocket.sent
+            )
+        )
+        self.assertFalse(any(event["type"] == "feedback" for event in display.events))
+
+        playback_finished.set()
+        await asyncio.wait_for(session._feedback_transition_task, timeout=0.1)
+
+        self.assertTrue(
+            any(
+                event["type"] == "session.instructions.append"
+                for event in session.websocket.sent
+            )
+        )
+        self.assertEqual(display.events[-1]["type"], "feedback")
 
     async def test_hangup_during_feedback_stops_input_but_keeps_session(self):
         audio = DummyAudio()

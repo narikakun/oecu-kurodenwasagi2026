@@ -154,6 +154,7 @@ class GPTLiveSession:
     OUTPUT_AUDIO_QUIET_SECONDS = 0.5
     OUTPUT_AUDIO_FINISH_TIMEOUT_SECONDS = 2.0
     DISCONNECT_AUDIO_ENQUEUE_TIMEOUT_SECONDS = 12.0
+    DISCONNECT_AUDIO_PLAYBACK_TIMEOUT_SECONDS = 12.0
     FEEDBACK_QUIET_SECONDS = 5.0
     FEEDBACK_FINISH_TIMEOUT_SECONDS = 45.0
     INPUT_BACKLOG_RESTART_SECONDS = 10
@@ -453,8 +454,18 @@ class GPTLiveSession:
                 raise RuntimeError(
                     "切断音を時間内に再生キューへ追加できませんでした"
                 )
-            # ここでは物理再生の完了を待たない。切断音を全量投入してからGPTへ
-            # 指示することで、後から届くフィードバック音声が必ずその後ろへ並ぶ。
+            try:
+                await asyncio.wait_for(
+                    self.audio.wait_until_played(),
+                    timeout=self.DISCONNECT_AUDIO_PLAYBACK_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                raise RuntimeError(
+                    "切断音の再生完了を時間内に確認できませんでした"
+                )
+            logger.info("詐欺電話終了の効果音の再生が完了しました")
+            # 切断音の物理再生が終わるまでGPTへ再開指示を送らないことで、
+            # フィードバックの字幕と音声が切断音より先行することを防ぐ。
             self.audio.clear_input_queue()
             if self.display is not None:
                 self.display.publish(
