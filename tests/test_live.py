@@ -311,10 +311,6 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
                     "event_id": "mute_during_disconnect_sound",
                 },
                 {
-                    "type": "session.input_audio.unmute",
-                    "event_id": "unmute_after_disconnect_sound",
-                },
-                {
                     "type": "session.instructions.append",
                     "event_id": "resume_feedback_after_disconnect",
                     "delegation_id": None,
@@ -322,6 +318,8 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
                 },
             ],
         )
+        self.assertIn("実際に交わした会話だけを根拠", session.FEEDBACK_RESUME_INSTRUCTION)
+        self.assertIn("会話になかった発言や行動は作らない", session.FEEDBACK_RESUME_INSTRUCTION)
 
         session._log_transcript(
             {"type": "session.output_transcript.delta", "delta": "。それでは失礼します"}
@@ -437,6 +435,42 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
                 for event in session.websocket.sent
             )
         )
+
+    async def test_hangup_during_feedback_stops_input_but_keeps_session(self):
+        audio = DummyAudio()
+        session = GPTLiveSession(Settings(api_key="test-key"), audio)
+        session.websocket = FakeWebSocket()
+        session._feedback_transition_started = True
+        session._sender_task = asyncio.create_task(asyncio.Event().wait())
+
+        await session.continue_feedback_after_hangup()
+
+        self.assertIsNone(session._sender_task)
+        self.assertTrue(session.is_running)
+        self.assertEqual(
+            session.websocket.sent[-1],
+            {
+                "type": "session.input_audio.mute",
+                "event_id": "mute_after_feedback_hangup",
+            },
+        )
+
+    async def test_feedback_image_hides_after_output_becomes_quiet(self):
+        audio = DummyAudio()
+        display = FakeDisplay()
+        session = GPTLiveSession(Settings(api_key="test-key"), audio, display)
+        session.FEEDBACK_QUIET_SECONDS = 0.01
+        session._feedback_transition_started = True
+        session._feedback_instruction_sent = True
+        session._feedback_started_at = asyncio.get_running_loop().time()
+
+        await session._handle_server_event(
+            {"type": "session.output_audio.delta", "delta": "cGNt"}
+        )
+        await asyncio.wait_for(session.wait_for_feedback_completion(), timeout=0.1)
+
+        self.assertTrue(session._feedback_done_event.is_set())
+        self.assertEqual(display.events[-1], {"type": "feedback", "active": False})
 
     async def test_disconnect_does_not_wait_full_timeout_when_audio_precedes_transcript(self):
         audio = DummyAudio()

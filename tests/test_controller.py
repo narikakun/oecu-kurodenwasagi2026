@@ -13,6 +13,9 @@ class FakeSession:
         self.prepare_count = 0
         self.digits = []
         self.active = False
+        self.feedback_active = False
+        self.feedback_done = asyncio.Event()
+        self.continue_feedback_count = 0
 
     @property
     def is_running(self):
@@ -21,6 +24,10 @@ class FakeSession:
     @property
     def is_conversation_active(self):
         return self.active
+
+    @property
+    def is_feedback_active(self):
+        return self.feedback_active
 
     async def prepare(self):
         self.running = True
@@ -38,6 +45,12 @@ class FakeSession:
 
     async def notify_dial(self, digit):
         self.digits.append(digit)
+
+    async def continue_feedback_after_hangup(self):
+        self.continue_feedback_count += 1
+
+    async def wait_for_feedback_completion(self):
+        await self.feedback_done.wait()
 
 
 class FakeRinger:
@@ -97,6 +110,62 @@ class FakeDisplay:
 
 
 class PhoneControllerTest(unittest.IsolatedAsyncioTestCase):
+    async def test_hook_down_keeps_feedback_running_until_it_finishes(self):
+        session = FakeSession()
+        session.running = True
+        session.active = True
+        session.feedback_active = True
+        display = FakeDisplay()
+        controller = PhoneController(session, display=display)
+
+        await controller.handle(HardwareEvent(HardwareEventType.HOOK_DOWN))
+
+        self.assertEqual(controller.state, AppState.FEEDBACK)
+        self.assertEqual(session.stop_count, 0)
+        self.assertEqual(session.continue_feedback_count, 1)
+        self.assertEqual(display.reset_count, 0)
+
+        session.feedback_done.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        self.assertEqual(controller.state, AppState.IDLE)
+        self.assertEqual(session.stop_count, 1)
+        self.assertEqual(display.reset_count, 1)
+
+    async def test_any_dial_stops_feedback_without_starting_ring(self):
+        session = FakeSession()
+        session.running = True
+        session.active = True
+        session.feedback_active = True
+        ringer = FakeRinger()
+        display = FakeDisplay()
+        controller = PhoneController(session, ringer, display=display)
+        await controller.handle(HardwareEvent(HardwareEventType.HOOK_DOWN))
+
+        await controller.handle(HardwareEvent(HardwareEventType.DIAL, 4))
+
+        self.assertEqual(controller.state, AppState.IDLE)
+        self.assertEqual(session.stop_count, 1)
+        self.assertIsNone(controller._ring_delay_task)
+        self.assertEqual(ringer.start_count, 0)
+        self.assertEqual(display.reset_count, 1)
+
+    async def test_dial_stops_feedback_while_handset_is_still_up(self):
+        session = FakeSession()
+        session.running = True
+        session.active = True
+        session.feedback_active = True
+        controller = PhoneController(session)
+        controller.state = AppState.CONVERSATION
+        controller._hook_up = True
+
+        await controller.handle(HardwareEvent(HardwareEventType.DIAL, 8))
+
+        self.assertEqual(controller.state, AppState.IDLE)
+        self.assertEqual(session.stop_count, 1)
+        self.assertEqual(session.digits, [])
+
     async def test_hook_starts_and_stops_conversation(self):
         session = FakeSession()
         display = FakeDisplay()
