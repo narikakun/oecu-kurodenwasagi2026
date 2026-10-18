@@ -154,7 +154,7 @@ class GPTLiveSession:
     OUTPUT_AUDIO_QUIET_SECONDS = 0.5
     OUTPUT_AUDIO_FINISH_TIMEOUT_SECONDS = 2.0
     DISCONNECT_AUDIO_TIMEOUT_SECONDS = 6.0
-    FEEDBACK_QUIET_SECONDS = 2.0
+    FEEDBACK_QUIET_SECONDS = 5.0
     FEEDBACK_FINISH_TIMEOUT_SECONDS = 45.0
     INPUT_BACKLOG_RESTART_SECONDS = 10
     RATE_LIMIT_RESTART_COUNT = 3
@@ -430,6 +430,7 @@ class GPTLiveSession:
     async def _play_disconnect_and_resume_feedback(self) -> None:
         """犯人役の終了後に切断音を挟み、GPTへ振り返り再開を伝える。"""
         input_muted = False
+        transition_failed = False
         try:
             logger.info("終了句を検出したため末尾音声の再生完了を待ちます")
             # Live WebSocketには発話完了イベントがないため、終了句を検出した後は
@@ -481,6 +482,7 @@ class GPTLiveSession:
             raise
         except Exception:
             logger.exception("詐欺電話終了の効果音を再生できませんでした")
+            transition_failed = True
         finally:
             if input_muted and self.websocket is not None and not self._feedback_instruction_sent:
                 try:
@@ -492,6 +494,8 @@ class GPTLiveSession:
                     )
                 except Exception:
                     logger.exception("終話音エラー後に音声入力を再開できませんでした")
+            if transition_failed:
+                self._mark_feedback_done()
 
     async def continue_feedback_after_hangup(self) -> None:
         """受話器を置いた後も出力受信だけを残して振り返りを継続する。"""
@@ -512,6 +516,14 @@ class GPTLiveSession:
     async def wait_for_feedback_completion(self) -> None:
         await self._feedback_done_event.wait()
 
+    def _mark_feedback_done(self) -> None:
+        """成功・失敗にかかわらずフィードバック待ちを確実に解除する。"""
+        if self._feedback_done_event.is_set():
+            return
+        self._feedback_done_event.set()
+        if self.display is not None:
+            self.display.publish({"type": "feedback", "active": False})
+
     def _note_feedback_output(self) -> None:
         if not self._feedback_instruction_sent or self._feedback_done_event.is_set():
             return
@@ -527,25 +539,19 @@ class GPTLiveSession:
             elapsed = asyncio.get_running_loop().time() - self._feedback_started_at
             remaining = max(0.1, self.FEEDBACK_FINISH_TIMEOUT_SECONDS - elapsed)
             await asyncio.wait_for(self.audio.wait_until_played(), timeout=remaining)
-            self._feedback_done_event.set()
-            if self.display is not None:
-                self.display.publish({"type": "feedback", "active": False})
+            self._mark_feedback_done()
             logger.info("フィードバック音声の再生完了を検出しました")
         except asyncio.CancelledError:
             raise
         except asyncio.TimeoutError:
             logger.warning("フィードバック音声の完了待ちがタイムアウトしました")
-            self._feedback_done_event.set()
-            if self.display is not None:
-                self.display.publish({"type": "feedback", "active": False})
+            self._mark_feedback_done()
 
     async def _finish_feedback_if_no_output(self) -> None:
         try:
             await asyncio.sleep(self.FEEDBACK_FINISH_TIMEOUT_SECONDS)
             logger.warning("フィードバック出力が完了時間内に確認できませんでした")
-            self._feedback_done_event.set()
-            if self.display is not None:
-                self.display.publish({"type": "feedback", "active": False})
+            self._mark_feedback_done()
         except asyncio.CancelledError:
             raise
 

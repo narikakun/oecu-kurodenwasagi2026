@@ -376,6 +376,7 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(session.OUTPUT_AUDIO_QUIET_SECONDS, 0.5)
         self.assertEqual(session.OUTPUT_AUDIO_FINISH_TIMEOUT_SECONDS, 2.0)
+        self.assertEqual(session.FEEDBACK_QUIET_SECONDS, 5.0)
 
     async def test_disconnect_continues_when_output_never_finishes(self):
         audio = DummyAudio()
@@ -470,6 +471,30 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(session.wait_for_feedback_completion(), timeout=0.1)
 
         self.assertTrue(session._feedback_done_event.is_set())
+        self.assertEqual(display.events[-1], {"type": "feedback", "active": False})
+
+    async def test_feedback_transition_failure_releases_completion_waiter(self):
+        class FailingWebSocket(FakeWebSocket):
+            async def send(self, value):
+                raise RuntimeError("connection lost")
+
+        display = FakeDisplay()
+        session = GPTLiveSession(
+            Settings(api_key="test-key"), DummyAudio(), display
+        )
+        session.websocket = FailingWebSocket()
+
+        with self.assertLogs("kuro_sagi_denwa.live", level="ERROR"):
+            session._log_transcript(
+                {
+                    "type": "session.output_transcript.delta",
+                    "delta": "それでは失礼します。",
+                }
+            )
+            await asyncio.wait_for(session._feedback_transition_task, timeout=0.1)
+
+        await asyncio.wait_for(session.wait_for_feedback_completion(), timeout=0.1)
+        self.assertFalse(session.is_feedback_active)
         self.assertEqual(display.events[-1], {"type": "feedback", "active": False})
 
     async def test_disconnect_does_not_wait_full_timeout_when_audio_precedes_transcript(self):
