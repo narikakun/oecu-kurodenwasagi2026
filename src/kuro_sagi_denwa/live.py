@@ -182,6 +182,7 @@ class GPTLiveSession:
         self._feedback_completion_task: asyncio.Task[None] | None = None
         self._feedback_started_at = 0.0
         self._handset_down = False
+        self._disconnect_playback_active = False
         self._prepare_lock = asyncio.Lock()
         self._closed_event = asyncio.Event()
         self._prepared = False
@@ -236,6 +237,7 @@ class GPTLiveSession:
             self._feedback_done_event.clear()
             self._feedback_started_at = 0.0
             self._handset_down = False
+            self._disconnect_playback_active = False
             self._closed_event.clear()
             self._next_audio_send_time = 0.0
             self.websocket = await websockets.connect(
@@ -374,6 +376,9 @@ class GPTLiveSession:
         delta = event.get("delta")
         if label is None or not isinstance(delta, str) or not delta:
             return False
+        if label == "AI" and self._disconnect_playback_active:
+            logger.info("切断音の再生中のAI字幕を破棄しました")
+            return True
 
         current = self._transcript_buffers.get(label, "")
         assistant = label == "AI"
@@ -445,6 +450,8 @@ class GPTLiveSession:
             input_muted = True
             await self._wait_for_output_audio_to_finish()
             logger.info("詐欺電話終了の効果音を再生します")
+            self._flush_transcript("AI")
+            self._disconnect_playback_active = True
             try:
                 await asyncio.wait_for(
                     self.audio.enqueue_audio_file(self.DISCONNECT_AUDIO_PATH),
@@ -464,6 +471,7 @@ class GPTLiveSession:
                     "切断音の再生完了を時間内に確認できませんでした"
                 )
             logger.info("詐欺電話終了の効果音の再生が完了しました")
+            self._disconnect_playback_active = False
             # 切断音の物理再生が終わるまでGPTへ再開指示を送らないことで、
             # フィードバックの字幕と音声が切断音より先行することを防ぐ。
             self.audio.clear_input_queue()
@@ -496,6 +504,7 @@ class GPTLiveSession:
             logger.exception("詐欺電話終了の効果音を再生できませんでした")
             transition_failed = True
         finally:
+            self._disconnect_playback_active = False
             if input_muted and self.websocket is not None and not self._feedback_instruction_sent:
                 try:
                     await self._send_event(
@@ -770,6 +779,9 @@ class GPTLiveSession:
         self._log_transcript(event)
 
         if event_type == "session.output_audio.delta":
+            if self._disconnect_playback_active:
+                logger.info("切断音の再生中のAI音声を破棄しました")
+                return False
             self._note_feedback_output()
             received_at = asyncio.get_running_loop().time()
             pcm = base64.b64decode(event["delta"])

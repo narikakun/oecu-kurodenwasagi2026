@@ -542,6 +542,27 @@ class GPTLiveSessionAsyncTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(display.events[-1]["type"], "feedback")
 
+    async def test_unsolicited_feedback_audio_and_captions_are_dropped_during_disconnect(
+        self,
+    ):
+        audio = DummyAudio()
+        display = FakeDisplay()
+        session = GPTLiveSession(Settings(api_key="test-key"), audio, display)
+        session._disconnect_playback_active = True
+
+        await session._handle_server_event(
+            {
+                "type": "session.output_transcript.delta",
+                "delta": "不審な電話は一度切ってください。",
+            }
+        )
+        await session._handle_server_event(
+            {"type": "session.output_audio.delta", "delta": "cGNt"}
+        )
+
+        self.assertEqual(display.events, [])
+        self.assertEqual(audio.played, [])
+
     async def test_hangup_during_feedback_stops_input_but_keeps_session(self):
         audio = DummyAudio()
         session = GPTLiveSession(Settings(api_key="test-key"), audio)
