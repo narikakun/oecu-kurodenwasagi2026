@@ -1291,8 +1291,10 @@ class AudioDevice:
         await self.play(tone)
         await self.wait_until_played()
 
-    async def play_audio_file(self, path: str | Path, volume: float = 1.0) -> None:
-        """音声ファイルを受話器と観客用出力へ1回だけ再生する。"""
+    async def enqueue_audio_file(
+        self, path: str | Path, volume: float = 1.0
+    ) -> None:
+        """音声ファイル全体を受話器・観客用の共通キューへ追加する。"""
         import miniaudio
 
         sound = await asyncio.to_thread(
@@ -1316,6 +1318,10 @@ class AudioDevice:
             len(pcm),
             block_count,
         )
+
+    async def play_audio_file(self, path: str | Path, volume: float = 1.0) -> None:
+        """音声ファイルを受話器と観客用出力へ1回だけ再生する。"""
+        await self.enqueue_audio_file(path, volume)
         await self.wait_until_played()
         logger.info("音声ファイルの再生が完了しました: path=%s", path)
 
