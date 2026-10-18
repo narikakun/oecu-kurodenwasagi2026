@@ -21,6 +21,13 @@ from .power import is_raspberry_pi, shutdown_raspberry_pi
 logger = logging.getLogger(__name__)
 
 
+class _PlaybackBarrier:
+    """このマーカーより前の音声が物理出力まで完了したことを通知する。"""
+
+    def __init__(self) -> None:
+        self.done = asyncio.Event()
+
+
 class _OutputWorker:
     """PortAudio出力を1本の固定スレッドで途切れにくく再生する。"""
 
@@ -1079,7 +1086,9 @@ class AudioDevice:
         )
         self.input_drop_count = 0
         self.input_drop_streak = 0
-        self.output_queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=200)
+        self.output_queue: asyncio.Queue[bytes | _PlaybackBarrier | None] = (
+            asyncio.Queue(maxsize=200)
+        )
         self._input_stream: Any = None
         self._output_stream: Any = None
         self._audience_stream: Any = None
@@ -1235,6 +1244,21 @@ class AudioDevice:
                 self.output_queue.task_done()
                 await self._stop_output_workers(discard=False)
                 return
+            if isinstance(data, _PlaybackBarrier):
+                workers = [
+                    worker
+                    for worker in (self._output_worker, self._audience_worker)
+                    if worker is not None and not worker.closed
+                ]
+                try:
+                    if workers:
+                        await asyncio.gather(
+                            *(asyncio.to_thread(worker.join) for worker in workers)
+                        )
+                finally:
+                    data.done.set()
+                    self.output_queue.task_done()
+                continue
             workers = [
                 worker
                 for worker in (self._output_worker, self._audience_worker)
@@ -1254,17 +1278,10 @@ class AudioDevice:
         await self.output_queue.put(data)
 
     async def wait_until_played(self) -> None:
-        """再生待ちの音声がなくなるまで待つ。"""
-        await self.output_queue.join()
-        workers = [
-            worker
-            for worker in (self._output_worker, self._audience_worker)
-            if worker is not None and not worker.closed
-        ]
-        if workers:
-            await asyncio.gather(
-                *(asyncio.to_thread(worker.join) for worker in workers)
-            )
+        """呼び出し時点までにキューへ入った音声の再生完了を待つ。"""
+        barrier = _PlaybackBarrier()
+        await self.output_queue.put(barrier)
+        await barrier.done.wait()
 
     async def _stop_output_workers(self, *, discard: bool) -> None:
         workers = [
@@ -1291,8 +1308,10 @@ class AudioDevice:
         await self.play(tone)
         await self.wait_until_played()
 
-    async def play_audio_file(self, path: str | Path, volume: float = 1.0) -> None:
-        """音声ファイルを受話器と観客用出力へ1回だけ再生する。"""
+    async def enqueue_audio_file(
+        self, path: str | Path, volume: float = 1.0
+    ) -> None:
+        """音声ファイル全体を受話器・観客用の共通キューへ追加する。"""
         import miniaudio
 
         sound = await asyncio.to_thread(
@@ -1316,6 +1335,10 @@ class AudioDevice:
             len(pcm),
             block_count,
         )
+
+    async def play_audio_file(self, path: str | Path, volume: float = 1.0) -> None:
+        """音声ファイルを受話器と観客用出力へ1回だけ再生する。"""
+        await self.enqueue_audio_file(path, volume)
         await self.wait_until_played()
         logger.info("音声ファイルの再生が完了しました: path=%s", path)
 

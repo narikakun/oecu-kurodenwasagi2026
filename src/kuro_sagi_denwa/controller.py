@@ -19,11 +19,18 @@ class Session(Protocol):
     @property
     def is_conversation_active(self) -> bool: ...
 
+    @property
+    def is_feedback_active(self) -> bool: ...
+
     async def prepare(self) -> None: ...
 
     async def start(self) -> None: ...
 
     async def stop(self) -> None: ...
+
+    async def continue_feedback_after_hangup(self) -> None: ...
+
+    async def wait_for_feedback_completion(self) -> None: ...
 
     async def notify_dial(self, digit: int) -> None: ...
 
@@ -56,6 +63,7 @@ class AppState(Enum):
     CONNECTING = "connecting"
     CONVERSATION = "conversation"
     ENDING = "ending"
+    FEEDBACK = "feedback"
     ERROR = "error"
 
 
@@ -77,10 +85,13 @@ class PhoneController:
         self._ring_delay_task: asyncio.Task[None] | None = None
         self._ring_watch_task: asyncio.Task[None] | None = None
         self._start_task: asyncio.Task[None] | None = None
+        self._feedback_watch_task: asyncio.Task[None] | None = None
 
     async def handle(self, event) -> None:
         if event.type == HardwareEventType.HOOK_UP:
             self._hook_up = True
+            if self.session.is_feedback_active:
+                await self._finish_feedback()
             if self.device_selector is not None:
                 self.device_selector.exit()
             await self._cancel_ring()
@@ -88,12 +99,22 @@ class PhoneController:
         elif event.type == HardwareEventType.HOOK_DOWN:
             self._hook_up = False
             await self._cancel_start()
-            await self._end_conversation()
-            if self.display is not None:
-                self.display.reset()
+            if self.session.is_feedback_active:
+                self.state = AppState.FEEDBACK
+                await self.session.continue_feedback_after_hangup()
+                self._start_feedback_watch()
+                logger.info("受話器が置かれましたがフィードバックを継続します")
+            else:
+                await self._end_conversation()
+                if self.display is not None:
+                    self.display.reset()
         elif event.type == HardwareEventType.DIAL:
             self.last_digit = event.digit
             logger.info("ダイヤル入力: %s", event.digit)
+            if self.session.is_feedback_active or self.state == AppState.FEEDBACK:
+                logger.info("ダイヤル入力によりフィードバックを終了します")
+                await self._finish_feedback()
+                return
             if (
                 event.digit is not None
                 and not self._hook_up
@@ -218,6 +239,7 @@ class PhoneController:
             await asyncio.gather(self._start_task, return_exceptions=True)
 
     async def close(self) -> None:
+        await self._cancel_feedback_watch()
         await self._cancel_start()
         await self._cancel_ring()
 
@@ -244,6 +266,43 @@ class PhoneController:
             await self.session.stop()
         finally:
             self.state = AppState.IDLE
+
+    def _start_feedback_watch(self) -> None:
+        if self._feedback_watch_task is None or self._feedback_watch_task.done():
+            self._feedback_watch_task = asyncio.create_task(
+                self._watch_feedback_completion()
+            )
+
+    async def _watch_feedback_completion(self) -> None:
+        try:
+            await self.session.wait_for_feedback_completion()
+            logger.info("フィードバックの再生が完了しました")
+            await self.session.stop()
+            if self.display is not None:
+                self.display.publish({"type": "feedback", "active": False})
+                self.display.reset()
+            self.state = AppState.IDLE
+        except asyncio.CancelledError:
+            return
+        finally:
+            if self._feedback_watch_task is asyncio.current_task():
+                self._feedback_watch_task = None
+
+    async def _cancel_feedback_watch(self) -> None:
+        task = self._feedback_watch_task
+        self._feedback_watch_task = None
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def _finish_feedback(self) -> None:
+        await self._cancel_feedback_watch()
+        if self.session.is_running:
+            await self.session.stop()
+        if self.display is not None:
+            self.display.publish({"type": "feedback", "active": False})
+            self.display.reset()
+        self.state = AppState.IDLE
 
     def _display_state(self, state: str, label: str) -> None:
         if self.display is not None:

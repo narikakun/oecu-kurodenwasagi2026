@@ -603,6 +603,49 @@ class AudioDeviceAudienceTest(unittest.IsolatedAsyncioTestCase):
         audio.play.assert_awaited_once_with(array("h", [500, -500]).tobytes())
         audio.wait_until_played.assert_awaited_once_with()
 
+    async def test_wait_until_played_uses_queue_position_not_global_queue_empty(self):
+        import threading
+
+        join_started = threading.Event()
+        release_join = threading.Event()
+
+        class FakeWorker:
+            closed = False
+
+            def __init__(self):
+                self.items = []
+
+            def put(self, data):
+                self.items.append(data)
+
+            def join(self):
+                join_started.set()
+                release_join.wait(timeout=1)
+
+            def stop(self, *, discard):
+                self.closed = True
+
+        audio = AudioDevice(Settings(api_key="test"))
+        worker = FakeWorker()
+        audio._output_worker = worker
+        play_task = asyncio.create_task(audio._play_loop())
+        try:
+            await audio.play(b"before-barrier")
+            wait_task = asyncio.create_task(audio.wait_until_played())
+            self.assertTrue(await asyncio.to_thread(join_started.wait, 0.5))
+
+            await audio.play(b"after-barrier")
+            self.assertEqual(worker.items, [b"before-barrier"])
+
+            release_join.set()
+            await asyncio.wait_for(wait_task, timeout=1)
+            await asyncio.sleep(0)
+            self.assertEqual(worker.items, [b"before-barrier", b"after-barrier"])
+        finally:
+            release_join.set()
+            await audio.output_queue.put(None)
+            await asyncio.wait_for(play_task, timeout=1)
+
     async def test_plays_long_audio_file_in_stream_sized_blocks(self):
         samples = list(range(1_000))
         fake_miniaudio = SimpleNamespace(

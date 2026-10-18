@@ -121,7 +121,10 @@ class GPTLiveSession:
     FEEDBACK_TRIGGER_TEXT = "それでは失礼します"
     FEEDBACK_RESUME_INSTRUCTION = (
         "通話終了音の再生が完了しました。犯人役は完全に終了してください。"
-        "直前の相手の判断に対応する中立の振り返りを、予定していた内容で今すぐ始めてください。"
+        "このセッションで実際に交わした会話だけを根拠に、今すぐ中立の振り返りを始めてください。"
+        "相手が実際に答えた内容を具体的に取り上げ、良かった判断と注意すべき判断、"
+        "会話中に現れた詐欺の兆候を短く説明してください。"
+        "会話になかった発言や行動は作らないでください。"
     )
     DEFAULT_INSTRUCTIONS = (
         "実際の電話のように、日本語で自然に会話してください。"
@@ -148,8 +151,12 @@ class GPTLiveSession:
     TRANSCRIPT_SENTENCE_SECONDS = 0.15
     # GPT-Liveの主WebSocketには出力音声の完了イベントがないため、字幕が先行しやすい
     # Raspberry Piでも末尾音声が届くまで待てる長さを確保する。
-    OUTPUT_AUDIO_QUIET_SECONDS = 2.0
-    OUTPUT_AUDIO_FINISH_TIMEOUT_SECONDS = 10.0
+    OUTPUT_AUDIO_QUIET_SECONDS = 0.5
+    OUTPUT_AUDIO_FINISH_TIMEOUT_SECONDS = 2.0
+    DISCONNECT_AUDIO_ENQUEUE_TIMEOUT_SECONDS = 12.0
+    DISCONNECT_AUDIO_PLAYBACK_TIMEOUT_SECONDS = 12.0
+    FEEDBACK_QUIET_SECONDS = 5.0
+    FEEDBACK_FINISH_TIMEOUT_SECONDS = 45.0
     INPUT_BACKLOG_RESTART_SECONDS = 10
     RATE_LIMIT_RESTART_COUNT = 3
     RATE_LIMIT_RESTART_WINDOW_SECONDS = 30
@@ -170,6 +177,12 @@ class GPTLiveSession:
         self._receiver_task: asyncio.Task[None] | None = None
         self._feedback_transition_task: asyncio.Task[None] | None = None
         self._feedback_transition_started = False
+        self._feedback_instruction_sent = False
+        self._feedback_done_event = asyncio.Event()
+        self._feedback_completion_task: asyncio.Task[None] | None = None
+        self._feedback_started_at = 0.0
+        self._handset_down = False
+        self._disconnect_playback_active = False
         self._prepare_lock = asyncio.Lock()
         self._closed_event = asyncio.Event()
         self._prepared = False
@@ -196,6 +209,10 @@ class GPTLiveSession:
             for task in (self._sender_task, self._receiver_task)
         )
 
+    @property
+    def is_feedback_active(self) -> bool:
+        return self._feedback_transition_started and not self._feedback_done_event.is_set()
+
     async def wait_for_failure(self) -> None:
         """バックグラウンド送受信の異常をメイン監視ループへ伝える。"""
         if self._failure_future is None:
@@ -216,6 +233,11 @@ class GPTLiveSession:
         try:
             logger.info("GPT-Liveセッションへ接続します")
             self._feedback_transition_started = False
+            self._feedback_instruction_sent = False
+            self._feedback_done_event.clear()
+            self._feedback_started_at = 0.0
+            self._handset_down = False
+            self._disconnect_playback_active = False
             self._closed_event.clear()
             self._next_audio_send_time = 0.0
             self.websocket = await websockets.connect(
@@ -242,6 +264,7 @@ class GPTLiveSession:
 
         self._stopping = False
         self._background_failed = False
+        self._handset_down = False
         if self.archive is not None:
             self.archive.begin_call()
         try:
@@ -353,6 +376,9 @@ class GPTLiveSession:
         delta = event.get("delta")
         if label is None or not isinstance(delta, str) or not delta:
             return False
+        if label == "AI" and self._disconnect_playback_active:
+            logger.info("切断音の再生中のAI字幕を破棄しました")
+            return True
 
         current = self._transcript_buffers.get(label, "")
         assistant = label == "AI"
@@ -410,6 +436,7 @@ class GPTLiveSession:
     async def _play_disconnect_and_resume_feedback(self) -> None:
         """犯人役の終了後に切断音を挟み、GPTへ振り返り再開を伝える。"""
         input_muted = False
+        transition_failed = False
         try:
             logger.info("終了句を検出したため末尾音声の再生完了を待ちます")
             # Live WebSocketには発話完了イベントがないため、終了句を検出した後は
@@ -423,7 +450,30 @@ class GPTLiveSession:
             input_muted = True
             await self._wait_for_output_audio_to_finish()
             logger.info("詐欺電話終了の効果音を再生します")
-            await self.audio.play_audio_file(self.DISCONNECT_AUDIO_PATH)
+            self._flush_transcript("AI")
+            self._disconnect_playback_active = True
+            try:
+                await asyncio.wait_for(
+                    self.audio.enqueue_audio_file(self.DISCONNECT_AUDIO_PATH),
+                    timeout=self.DISCONNECT_AUDIO_ENQUEUE_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                raise RuntimeError(
+                    "切断音を時間内に再生キューへ追加できませんでした"
+                )
+            try:
+                await asyncio.wait_for(
+                    self.audio.wait_until_played(),
+                    timeout=self.DISCONNECT_AUDIO_PLAYBACK_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                raise RuntimeError(
+                    "切断音の再生完了を時間内に確認できませんでした"
+                )
+            logger.info("詐欺電話終了の効果音の再生が完了しました")
+            self._disconnect_playback_active = False
+            # 切断音の物理再生が終わるまでGPTへ再開指示を送らないことで、
+            # フィードバックの字幕と音声が切断音より先行することを防ぐ。
             self.audio.clear_input_queue()
             if self.display is not None:
                 self.display.publish(
@@ -436,26 +486,26 @@ class GPTLiveSession:
                 )
             await self._send_event(
                 {
-                    "type": "session.input_audio.unmute",
-                    "event_id": "unmute_after_disconnect_sound",
-                }
-            )
-            input_muted = False
-            await self._send_event(
-                {
                     "type": "session.instructions.append",
                     "event_id": "resume_feedback_after_disconnect",
                     "delegation_id": None,
                     "content": self.FEEDBACK_RESUME_INSTRUCTION,
                 }
             )
+            self._feedback_instruction_sent = True
+            self._feedback_started_at = asyncio.get_running_loop().time()
+            self._feedback_completion_task = asyncio.create_task(
+                self._finish_feedback_if_no_output()
+            )
             logger.info("GPT-Liveへ振り返りの開始を指示しました")
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("詐欺電話終了の効果音を再生できませんでした")
+            transition_failed = True
         finally:
-            if input_muted and self.websocket is not None:
+            self._disconnect_playback_active = False
+            if input_muted and self.websocket is not None and not self._feedback_instruction_sent:
                 try:
                     await self._send_event(
                         {
@@ -465,6 +515,66 @@ class GPTLiveSession:
                     )
                 except Exception:
                     logger.exception("終話音エラー後に音声入力を再開できませんでした")
+            if transition_failed:
+                self._mark_feedback_done()
+
+    async def continue_feedback_after_hangup(self) -> None:
+        """受話器を置いた後も出力受信だけを残して振り返りを継続する。"""
+        self._handset_down = True
+        if self._sender_task is not None:
+            self._sender_task.cancel()
+            await asyncio.gather(self._sender_task, return_exceptions=True)
+            self._sender_task = None
+        self.audio.clear_input_queue()
+        if self.websocket is not None:
+            await self._send_event(
+                {
+                    "type": "session.input_audio.mute",
+                    "event_id": "mute_after_feedback_hangup",
+                }
+            )
+
+    async def wait_for_feedback_completion(self) -> None:
+        await self._feedback_done_event.wait()
+
+    def _mark_feedback_done(self) -> None:
+        """成功・失敗にかかわらずフィードバック待ちを確実に解除する。"""
+        if self._feedback_done_event.is_set():
+            return
+        self._feedback_done_event.set()
+        if self.display is not None:
+            self.display.publish({"type": "feedback", "active": False})
+
+    def _note_feedback_output(self) -> None:
+        if not self._feedback_instruction_sent or self._feedback_done_event.is_set():
+            return
+        if self._feedback_completion_task is not None:
+            self._feedback_completion_task.cancel()
+        self._feedback_completion_task = asyncio.create_task(
+            self._complete_feedback_after_quiet()
+        )
+
+    async def _complete_feedback_after_quiet(self) -> None:
+        try:
+            await asyncio.sleep(self.FEEDBACK_QUIET_SECONDS)
+            elapsed = asyncio.get_running_loop().time() - self._feedback_started_at
+            remaining = max(0.1, self.FEEDBACK_FINISH_TIMEOUT_SECONDS - elapsed)
+            await asyncio.wait_for(self.audio.wait_until_played(), timeout=remaining)
+            self._mark_feedback_done()
+            logger.info("フィードバック音声の再生完了を検出しました")
+        except asyncio.CancelledError:
+            raise
+        except asyncio.TimeoutError:
+            logger.warning("フィードバック音声の完了待ちがタイムアウトしました")
+            self._mark_feedback_done()
+
+    async def _finish_feedback_if_no_output(self) -> None:
+        try:
+            await asyncio.sleep(self.FEEDBACK_FINISH_TIMEOUT_SECONDS)
+            logger.warning("フィードバック出力が完了時間内に確認できませんでした")
+            self._mark_feedback_done()
+        except asyncio.CancelledError:
+            raise
 
     async def _wait_for_output_audio_to_finish(self) -> None:
         """音声デルタが静まり、端末の再生が完了した状態を確認する。"""
@@ -669,6 +779,10 @@ class GPTLiveSession:
         self._log_transcript(event)
 
         if event_type == "session.output_audio.delta":
+            if self._disconnect_playback_active:
+                logger.info("切断音の再生中のAI音声を破棄しました")
+                return False
+            self._note_feedback_output()
             received_at = asyncio.get_running_loop().time()
             pcm = base64.b64decode(event["delta"])
             if received_at - self._last_output_audio_log_at >= 0.25:
@@ -722,6 +836,12 @@ class GPTLiveSession:
 
     async def _abort_start(self) -> None:
         self._stopping = True
+        if self._feedback_completion_task is not None:
+            self._feedback_completion_task.cancel()
+            await asyncio.gather(
+                self._feedback_completion_task, return_exceptions=True
+            )
+            self._feedback_completion_task = None
         if self._feedback_transition_task is not None:
             self._feedback_transition_task.cancel()
             await asyncio.gather(
@@ -748,6 +868,12 @@ class GPTLiveSession:
         was_running = self.websocket is not None
         if was_running:
             logger.info("GPT-Liveセッションを終了します")
+        if self._feedback_completion_task is not None:
+            self._feedback_completion_task.cancel()
+            await asyncio.gather(
+                self._feedback_completion_task, return_exceptions=True
+            )
+            self._feedback_completion_task = None
         if self._feedback_transition_task is not None:
             self._feedback_transition_task.cancel()
             await asyncio.gather(
